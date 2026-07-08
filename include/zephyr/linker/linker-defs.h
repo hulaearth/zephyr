@@ -136,11 +136,11 @@ extern char __bss_start[];
 extern char __bss_end[];
 
 /* Used by arch_data_copy() or arch-specific implementation */
-#ifdef CONFIG_XIP
+#if defined(CONFIG_XIP) || defined(CONFIG_BIOT_SANDBOX_N6_PSRAM_CLOCK_SRAM)
 extern char __data_region_load_start[];
 extern char __data_region_start[];
 extern char __data_region_end[];
-#endif /* CONFIG_XIP */
+#endif /* CONFIG_XIP || CONFIG_BIOT_SANDBOX_N6_PSRAM_CLOCK_SRAM */
 
 #ifdef CONFIG_MMU
 /* Virtual addresses of page-aligned kernel image mapped into RAM at boot */

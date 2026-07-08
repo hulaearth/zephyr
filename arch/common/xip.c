@@ -26,8 +26,11 @@ extern volatile uintptr_t __stack_chk_guard;
  */
 void arch_data_copy(void)
 {
+#if defined(CONFIG_XIP) || defined(CONFIG_BIOT_SANDBOX_N6_PSRAM_CLOCK_SRAM)
 	arch_early_memcpy(&__data_region_start, &__data_region_load_start,
 		       __data_region_end - __data_region_start);
+#endif
+#ifdef CONFIG_XIP
 #ifdef CONFIG_ARCH_HAS_RAMFUNC_SUPPORT
 	arch_early_memcpy(&__ramfunc_region_start, &__ramfunc_load_start,
 		       __ramfunc_end - __ramfunc_region_start);
@@ -45,6 +48,7 @@ void arch_data_copy(void)
 #if DT_NODE_HAS_STATUS_OKAY(DT_CHOSEN(zephyr_dtcm))
 	arch_early_memcpy(&__dtcm_data_start, &__dtcm_data_load_start,
 		       __dtcm_data_end - __dtcm_data_start);
+#endif
 #endif
 #ifdef CONFIG_CODE_DATA_RELOCATION
 	extern void data_copy_xip_relocation(void);

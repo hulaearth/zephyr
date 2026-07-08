@@ -135,7 +135,8 @@
  */
 #if defined(CONFIG_ARCH_POSIX)
 #define GROUP_DATA_LINK_IN(vregion, lregion)
-#elif defined(CONFIG_XIP) || defined(K_MEM_IS_VM_KERNEL)
+#elif defined(CONFIG_XIP) || defined(K_MEM_IS_VM_KERNEL) || \
+	defined(CONFIG_BIOT_SANDBOX_N6_PSRAM_SPLIT_MIN)
 #define GROUP_DATA_LINK_IN(vregion, lregion) > vregion AT > lregion
 #else
 #define GROUP_DATA_LINK_IN(vregion, lregion) > vregion

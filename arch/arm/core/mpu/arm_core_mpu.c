@@ -87,7 +87,8 @@ static const struct z_arm_mpu_partition static_regions[] = {
 		.attr = K_MEM_PARTITION_P_RW_U_NA_NOCACHE,
 	},
 #endif /* CONFIG_NOCACHE_MEMORY */
-#if defined(CONFIG_ARCH_HAS_RAMFUNC_SUPPORT)
+#if defined(CONFIG_ARCH_HAS_RAMFUNC_SUPPORT) && \
+	!defined(CONFIG_BIOT_SANDBOX_N6_PSRAM_CLOCK_SRAM)
 	{
 		/* Special RAM area for program text */
 		.start = (uint32_t)&__ramfunc_start,
@@ -98,7 +99,7 @@ static const struct z_arm_mpu_partition static_regions[] = {
 		.attr = K_MEM_PARTITION_P_RX_U_RX,
 #endif
 	},
-#endif /* CONFIG_ARCH_HAS_RAMFUNC_SUPPORT */
+#endif /* CONFIG_ARCH_HAS_RAMFUNC_SUPPORT && !CONFIG_BIOT_SANDBOX_N6_PSRAM_CLOCK_SRAM */
 #if defined(CONFIG_CODE_DATA_RELOCATION_SRAM)
 	{
 		/* RAM area for relocated text */

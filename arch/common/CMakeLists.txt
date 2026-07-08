@@ -18,7 +18,9 @@ if(CONFIG_GEN_ISR_TABLES)
 endif()
 
 zephyr_library_sources(init.c)
-zephyr_library_sources_ifdef(CONFIG_XIP xip.c)
+if(CONFIG_XIP OR CONFIG_CODE_DATA_RELOCATION)
+  zephyr_library_sources(xip.c)
+endif()
 
 zephyr_library_sources_ifdef(
   CONFIG_ISR_TABLE_SHELL

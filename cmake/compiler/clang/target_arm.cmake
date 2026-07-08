@@ -11,7 +11,9 @@ endif()
 list(APPEND ARM_C_FLAGS -mabi=aapcs)
 
 if(CONFIG_FPU)
-  list(APPEND ARM_C_FLAGS   -mfpu=${GCC_M_FPU})
+  if(NOT CONFIG_CPU_CORTEX_M55 OR NOT CONFIG_ARMV8_1_M_MVEF)
+    list(APPEND ARM_C_FLAGS   -mfpu=${GCC_M_FPU})
+  endif()
 
   if(CONFIG_DCLS AND NOT CONFIG_FP_HARDABI)
     # If the processor is equipped with VFP and configured in DCLS topology,

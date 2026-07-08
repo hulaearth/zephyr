@@ -59,6 +59,7 @@ MemoryRegion = NewType('MemoryRegion', str)
 
 class SectionKind(Enum):
     TEXT = "text"
+    EXIDX = "exidx"
     RODATA = "rodata"
     DATA = "data"
     BSS = "bss"
@@ -78,17 +79,21 @@ class SectionKind(Enum):
         >>> SectionKind.for_section_with_name(".device_deps")
         None
         """
-        if ".text." in name:
+        if name.startswith((".rel", ".rela")):
+            return None
+        if name.startswith(".ARM.exidx"):
+            return cls.EXIDX
+        elif name.startswith(".text."):
             return cls.TEXT
-        elif ".rodata." in name:
+        elif name.startswith(".rodata."):
             return cls.RODATA
-        elif ".data." in name:
+        elif name.startswith(".data."):
             return cls.DATA
-        elif ".bss." in name:
+        elif name.startswith(".bss."):
             return cls.BSS
-        elif ".noinit." in name:
+        elif name.startswith(".noinit."):
             return cls.NOINIT
-        elif ".literal." in name:
+        elif name.startswith(".literal."):
             return cls.LITERAL
         else:
             return None
@@ -109,15 +114,26 @@ PRINT_TEMPLATE_NOKEEP = """
 """
 
 SECTION_LOAD_MEMORY_SEQ = """
-        __{mem}_{kind}_rom_start = LOADADDR(.{mem}_{kind}_reloc);
+        __{mem}_{kind}_rom_start = LOADADDR({section_name});
+"""
+
+SRAM_TEXT_RELOC_COMPAT_SEQ = """
+        PROVIDE(__ram_text_reloc_start = __{mem}_text_reloc_start);
+        PROVIDE(__ram_text_reloc_size = __{mem}_text_reloc_size);
+"""
+
+DISCARD_SECTION_SEQ = """
+
+/* Discard sections for relocated {kind_name} entries that cannot remain in ROM. */
+
+	/DISCARD/ :
+        {{
+                {linker_sections}
+	}}
 """
 
 LOAD_ADDRESS_LOCATION_FLASH = """
-#ifdef CONFIG_XIP
 GROUP_DATA_LINK_IN({0}, ROMABLE_REGION)
-#else
-GROUP_DATA_LINK_IN({0}, {0})
-#endif
 """
 
 LOAD_ADDRESS_LOCATION_FLASH_NOCOPY = """
@@ -145,14 +161,14 @@ LINKER_SECTION_SEQ = """
 
 /* Linker section for memory region {mem_upper} for {kind_name} section  */
 
-	SECTION_PROLOGUE(.{mem}_{kind}_reloc,{options},)
+	SECTION_PROLOGUE({section_name},{options},)
         {{
                 . = ALIGN(4);
                 {linker_sections}
                 . = ALIGN(4);
 	}} {load_address}
         __{mem}_{kind}_reloc_end = .;
-        __{mem}_{kind}_reloc_start = ADDR(.{mem}_{kind}_reloc);
+        __{mem}_{kind}_reloc_start = ADDR({section_name});
         __{mem}_{kind}_reloc_size = __{mem}_{kind}_reloc_end - __{mem}_{kind}_reloc_start;
 """
 
@@ -160,7 +176,7 @@ LINKER_SECTION_SEQ_MPU = """
 
 /* Linker section for memory region {mem_upper} for {kind_name} section  */
 
-	SECTION_PROLOGUE(.{mem}_{kind}_reloc,{options},)
+	SECTION_PROLOGUE({section_name},{options},)
         {{
                 __{mem}_{kind}_reloc_start = .;
                 {linker_sections}
@@ -286,9 +302,14 @@ def assign_to_correct_mem_region(
     """
     use_section_kinds, memory_region = section_kinds_from_memory_region(memory_region)
 
-    memory_region, _, align_size = memory_region.partition('_')
-    if align_size:
+    memory_region, *flags = memory_region.split('|')
+    memory_region_base, sep, align_size = memory_region.rpartition('_')
+    if sep and align_size.isdecimal():
+        memory_region = memory_region_base
         mpu_align[memory_region] = int(align_size)
+
+    if flags:
+        memory_region = '|'.join((memory_region, *flags))
 
     keep_sections = '|NOKEEP' not in memory_region
     memory_region = memory_region.replace('|NOKEEP', '')
@@ -325,6 +346,10 @@ def section_kinds_from_memory_region(memory_region: str) -> 'tuple[set[SectionKi
     if not out:
         # No listed kinds implies all of the kinds
         out = set(SectionKind)
+    elif SectionKind.TEXT in out:
+        # ARM EHABI unwind index entries contain PREL31 references to their
+        # covered text and must stay within range of relocated functions.
+        out.add(SectionKind.EXIDX)
     return (out, memory_region)
 
 
@@ -369,7 +394,12 @@ def string_create_helper(
         # Create a complete list of funcs/ variables that goes in for this
         # memory type
         tmp = print_linker_sections(full_list_of_sections[kind])
-        if region_is_default_ram(memory_type) and kind in (
+        if kind is SectionKind.EXIDX:
+            linker_string += DISCARD_SECTION_SEQ.format(
+                kind_name=kind,
+                linker_sections=tmp,
+            )
+        elif region_is_default_ram(memory_type) and kind in (
             SectionKind.DATA,
             SectionKind.BSS,
             SectionKind.NOINIT,
@@ -384,6 +414,9 @@ def string_create_helper(
                 "linker_sections": tmp,
                 "load_address": load_address_string,
                 "options": "(NOLOAD)" if kind is SectionKind.NOINIT else "",
+                "section_name": f".ARM.exidx.{memory_type.lower()}_reloc"
+                if kind is SectionKind.EXIDX
+                else f".{memory_type.lower()}_{kind.value}_reloc",
             }
 
             if not region_is_default_ram(memory_type) and kind is SectionKind.RODATA:
@@ -401,6 +434,8 @@ def string_create_helper(
                     linker_string += LINKER_SECTION_SEQ.format(**fields)
             if load_address_in_flash:
                 linker_string += SECTION_LOAD_MEMORY_SEQ.format(**fields)
+            if kind is SectionKind.TEXT:
+                linker_string += SRAM_TEXT_RELOC_COMPAT_SEQ.format(**fields)
     return linker_string
 
 
@@ -430,6 +465,9 @@ def generate_linker_script(
         )
         gen_string += string_create_helper(
             SectionKind.TEXT, memory_type, full_list_of_sections, True, is_copy, phdrs
+        )
+        gen_string += string_create_helper(
+            SectionKind.EXIDX, memory_type, full_list_of_sections, True, is_copy, phdrs
         )
         gen_string += string_create_helper(
             SectionKind.RODATA, memory_type, full_list_of_sections, True, is_copy, phdrs

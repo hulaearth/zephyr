@@ -920,6 +920,11 @@ int stm32_clock_control_init(const struct device *dev)
 	LL_MEM_EnableClock(misc_ram);
 	LL_MEM_EnableClockLowPower(misc_ram);
 
+	if (IS_ENABLED(CONFIG_CLOCK_STM32_N6_SKIP_APP_REINIT)) {
+		SystemCoreClock = CONFIG_SYS_CLOCK_HW_CYCLES_PER_SEC;
+		return 0;
+	}
+
 	/* Set up individual enabled clocks */
 	set_up_fixed_clock_sources();
 

@@ -21,6 +21,8 @@
 /* physical address of RAM */
 #ifdef CONFIG_XIP
 #define ROMABLE_REGION FLASH
+#elif defined(CONFIG_BIOT_SANDBOX_N6_PSRAM_SPLIT_MIN)
+#define ROMABLE_REGION PSRAM_EXEC
 #else
 #define ROMABLE_REGION RAM
 #endif
@@ -43,6 +45,8 @@
 #if defined(CONFIG_FLASH_USES_MAPPED_PARTITION)
 #if defined(CONFIG_XIP)
 #define ROM_ADDR (DT_REG_ADDR(DT_CHOSEN(zephyr_code_partition)))
+#elif defined(CONFIG_BIOT_SANDBOX_N6_PSRAM_SPLIT_MIN)
+#define ROM_ADDR DT_REG_ADDR(DT_CHOSEN(mcuboot_image_ram))
 #else
 #define ROM_ADDR RAM_ADDR
 #endif

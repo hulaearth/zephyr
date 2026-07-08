@@ -119,4 +119,13 @@ config CLOCK_STM32_MCO_HAS_ENABLE_BIT
 	help
 	  Hidden option indicating the series has a dedicated bit to enable MCO output
 
+config CLOCK_STM32_N6_SKIP_APP_REINIT
+	bool "Skip STM32N6 app-domain clock reinitialization"
+	depends on SOC_SERIES_STM32N6X
+	help
+	  Diagnostic option for STM32N6 chain-loaded applications that execute from
+	  external memory already initialized by the bootloader. When enabled, the
+	  app-domain RCC init preserves the existing SYSCLK, PLL, and IC clock state
+	  and only refreshes the CMSIS SystemCoreClock value.
+
 endif # CLOCK_CONTROL_STM32_CUBE
