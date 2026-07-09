@@ -74,10 +74,10 @@ class SectionKind(Enum):
         """
         Return the kind of section that includes a section with the given name.
 
-        >>> SectionKind.for_section_with_name(".rodata.str1.4")
+        >>> SectionKind.for_section_named(".rodata.str1.4")
         <SectionKind.RODATA: 'rodata'>
-        >>> SectionKind.for_section_with_name(".device_deps")
-        None
+        >>> SectionKind.for_section_named(".device_deps") is None
+        True
         """
         if name.startswith((".rel", ".rela")):
             return None
@@ -115,11 +115,6 @@ PRINT_TEMPLATE_NOKEEP = """
 
 SECTION_LOAD_MEMORY_SEQ = """
         __{mem}_{kind}_rom_start = LOADADDR({section_name});
-"""
-
-SRAM_TEXT_RELOC_COMPAT_SEQ = """
-        PROVIDE(__ram_text_reloc_start = __{mem}_text_reloc_start);
-        PROVIDE(__ram_text_reloc_size = __{mem}_text_reloc_size);
 """
 
 DISCARD_SECTION_SEQ = """
@@ -303,9 +298,8 @@ def assign_to_correct_mem_region(
     use_section_kinds, memory_region = section_kinds_from_memory_region(memory_region)
 
     memory_region, *flags = memory_region.split('|')
-    memory_region_base, sep, align_size = memory_region.rpartition('_')
-    if sep and align_size.isdecimal():
-        memory_region = memory_region_base
+    memory_region, align_size = split_alignment_suffix(memory_region)
+    if align_size:
         mpu_align[memory_region] = int(align_size)
 
     if flags:
@@ -324,6 +318,29 @@ def assign_to_correct_mem_region(
     return {MemoryRegion(memory_region): output_sections}
 
 
+def split_alignment_suffix(memory_region: str) -> 'tuple[str, str]':
+    """
+    Split a final MPU alignment suffix from a memory region name.
+
+    Only a final underscore followed by decimal digits is an alignment suffix;
+    underscores elsewhere are part of the memory-region name.
+
+    >>> split_alignment_suffix('AXISRAM_SAFE')
+    ('AXISRAM_SAFE', '')
+    >>> split_alignment_suffix('AXISRAM_SAFE_32')
+    ('AXISRAM_SAFE', '32')
+    >>> split_alignment_suffix('AXISRAM_SAFE_TEXT')
+    ('AXISRAM_SAFE_TEXT', '')
+    >>> split_alignment_suffix('SRAM2_256')
+    ('SRAM2', '256')
+    """
+    memory_region_base, sep, align_size = memory_region.rpartition('_')
+    if sep and align_size.isdecimal():
+        return memory_region_base, align_size
+
+    return memory_region, ''
+
+
 def section_kinds_from_memory_region(memory_region: str) -> 'tuple[set[SectionKind], str]':
     """
     Get the section kinds requested by the given memory region name.
@@ -334,8 +351,8 @@ def section_kinds_from_memory_region(memory_region: str) -> 'tuple[set[SectionKi
     In addition to the parsed kinds, the input region minus specifiers for those
     kinds is returned.
 
-    >>> section_kinds_from_memory_region('SRAM2_TEXT')
-    ({<SectionKind.TEXT: 'text'>}, 'SRAM2')
+    >>> section_kinds_from_memory_region('SRAM2_TEXT') == ({SectionKind.TEXT, SectionKind.EXIDX}, 'SRAM2')
+    True
     """
     out = set()
     for kind in SectionKind:
@@ -434,8 +451,6 @@ def string_create_helper(
                     linker_string += LINKER_SECTION_SEQ.format(**fields)
             if load_address_in_flash:
                 linker_string += SECTION_LOAD_MEMORY_SEQ.format(**fields)
-            if kind is SectionKind.TEXT:
-                linker_string += SRAM_TEXT_RELOC_COMPAT_SEQ.format(**fields)
     return linker_string
 
 
