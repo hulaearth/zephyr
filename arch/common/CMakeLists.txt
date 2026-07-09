@@ -18,7 +18,8 @@ if(CONFIG_GEN_ISR_TABLES)
 endif()
 
 zephyr_library_sources(init.c)
-if(CONFIG_XIP OR CONFIG_CODE_DATA_RELOCATION)
+if(CONFIG_XIP OR CONFIG_CODE_DATA_RELOCATION OR
+    CONFIG_ARCH_DATA_COPY_FOR_RAM_LOAD_SPLIT)
   zephyr_library_sources(xip.c)
 endif()
 

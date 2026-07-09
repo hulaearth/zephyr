@@ -26,7 +26,7 @@ extern volatile uintptr_t __stack_chk_guard;
  */
 void arch_data_copy(void)
 {
-#if defined(CONFIG_XIP) || defined(CONFIG_BIOT_SANDBOX_N6_PSRAM_CLOCK_SRAM)
+#if defined(CONFIG_XIP) || defined(CONFIG_ARCH_DATA_COPY_FOR_RAM_LOAD_SPLIT)
 	arch_early_memcpy(&__data_region_start, &__data_region_load_start,
 		       __data_region_end - __data_region_start);
 #endif

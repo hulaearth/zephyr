@@ -11,14 +11,15 @@
 extern "C" {
 #endif
 
-#if defined(CONFIG_XIP) || defined(CONFIG_CODE_DATA_RELOCATION)
+#if defined(CONFIG_XIP) || defined(CONFIG_CODE_DATA_RELOCATION) || \
+	defined(CONFIG_ARCH_DATA_COPY_FOR_RAM_LOAD_SPLIT)
 void arch_data_copy(void);
 #else
 static inline void arch_data_copy(void)
 {
 	/* Do nothing */
 }
-#endif /* CONFIG_XIP || CONFIG_CODE_DATA_RELOCATION */
+#endif /* data copy enabled */
 #ifdef __cplusplus
 }
 #endif
