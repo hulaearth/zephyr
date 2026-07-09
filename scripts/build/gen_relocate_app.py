@@ -325,12 +325,12 @@ def split_alignment_suffix(memory_region: str) -> 'tuple[str, str]':
     Only a final underscore followed by decimal digits is an alignment suffix;
     underscores elsewhere are part of the memory-region name.
 
-    >>> split_alignment_suffix('AXISRAM_SAFE')
-    ('AXISRAM_SAFE', '')
-    >>> split_alignment_suffix('AXISRAM_SAFE_32')
-    ('AXISRAM_SAFE', '32')
-    >>> split_alignment_suffix('AXISRAM_SAFE_TEXT')
-    ('AXISRAM_SAFE_TEXT', '')
+    >>> split_alignment_suffix('SRAM_FAST')
+    ('SRAM_FAST', '')
+    >>> split_alignment_suffix('SRAM_FAST_32')
+    ('SRAM_FAST', '32')
+    >>> split_alignment_suffix('SRAM_FAST_TEXT')
+    ('SRAM_FAST_TEXT', '')
     >>> split_alignment_suffix('SRAM2_256')
     ('SRAM2', '256')
     """
