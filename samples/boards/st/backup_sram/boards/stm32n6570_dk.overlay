@@ -1,0 +1,3 @@
+&backup_sram {
+	status = "okay";
+};

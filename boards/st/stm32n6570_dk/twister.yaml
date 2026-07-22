@@ -5,6 +5,7 @@ ram: 192
 flash: 512
 vendor: st
 supported:
+  - backup_sram
   - arduino_i2c
   - arduino_serial
   - arduino_spi
