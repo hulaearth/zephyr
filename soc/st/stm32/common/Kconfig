@@ -12,6 +12,7 @@ config STM32_BACKUP_SRAM
 	bool "STM32 Backup SRAM"
 	default y
 	depends on DT_HAS_ST_STM32_BACKUP_SRAM_ENABLED
+	select STM32_BACKUP_PROTECTION if SOC_SERIES_STM32N6X
 	help
 	  Enable support for STM32 backup SRAM.
 
