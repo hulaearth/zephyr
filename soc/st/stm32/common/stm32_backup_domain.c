@@ -8,6 +8,7 @@
 #include <zephyr/spinlock.h>
 #include <zephyr/logging/log.h>
 #include <stm32_backup_domain.h>
+#include <errno.h>
 #include <stddef.h>
 
 LOG_MODULE_REGISTER(stm32_backup_domain, CONFIG_SOC_LOG_LEVEL);
@@ -41,6 +42,25 @@ void stm32_backup_domain_enable_access(void)
 	refcount++;
 
 	k_spin_unlock(&lock, key);
+}
+
+int stm32_backup_domain_enable_access_checked(void)
+{
+	k_spinlock_key_t key = k_spin_lock(&lock);
+	int ret = 0;
+
+	if (refcount == 0U) {
+		ENABLE_BKUP_ACCESS();
+		if (!IS_ENABLED_BKUP_ACCESS()) {
+			ret = -EACCES;
+		}
+	}
+	if (ret == 0) {
+		refcount++;
+	}
+
+	k_spin_unlock(&lock, key);
+	return ret;
 }
 
 void stm32_backup_domain_disable_access(void)

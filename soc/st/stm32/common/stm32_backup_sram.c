@@ -20,6 +20,35 @@ struct stm32_backup_sram_config {
 	struct stm32_pclken pclken;
 };
 
+static int stm32_backup_sram_enable_retention(void)
+{
+#if defined(CONFIG_SOC_SERIES_STM32N6X)
+	LL_PWR_EnableBkpSRAMSBRetention();
+
+	return LL_PWR_IsEnabledBkpSRAMSBRetention() ? 0 : -EIO;
+#elif defined(CONFIG_SOC_SERIES_STM32U5X)
+	/*
+	 * On STM32U5 series, backup RAM retention can only be enabled
+	 * when the LDO is selected as voltage regulator. However, the
+	 * SMPS regulator may have been selected by the time this code
+	 * executes, which results in a deadlock. To avoid this, the
+	 * SoC initialization code is modified to enable the regulator
+	 * on our behalf, before switching regulators - don't try to
+	 * enable the regulator again.
+	 */
+	return 0;
+#else
+	/* enable backup sram regulator (required to retain backup SRAM content
+	 * while in standby or VBAT modes).
+	 */
+	LL_PWR_EnableBkUpRegulator();
+	while (!LL_PWR_IsEnabledBkUpRegulator()) {
+	}
+
+	return 0;
+#endif
+}
+
 static int stm32_backup_sram_init(const struct device *dev)
 {
 	const struct stm32_backup_sram_config *config = dev->config;
@@ -41,25 +70,16 @@ static int stm32_backup_sram_init(const struct device *dev)
 	}
 
 	/* Add a refcount to backup domain access and never remove it */
-	stm32_backup_domain_enable_access();
+	ret = stm32_backup_domain_enable_access_checked();
+	if (ret < 0) {
+		LOG_ERR("Could not enable backup domain access (%d)", ret);
+		return ret;
+	}
 
-	if (IS_ENABLED(CONFIG_SOC_SERIES_STM32U5X)) {
-		/*
-		 * On STM32U5 series, backup RAM retention can only be enabled
-		 * when the LDO is selected as voltage regulator. However, the
-		 * SMPS regulator may have been selected by the time this code
-		 * executes, which results in a deadlock. To avoid this, the
-		 * SoC initialization code is modified to enable the regulator
-		 * on our behalf, before switching regulators - don't try to
-		 * enable the regulator again.
-		 */
-	} else {
-		/* enable backup sram regulator (required to retain backup SRAM content
-		 * while in standby or VBAT modes).
-		 */
-		LL_PWR_EnableBkUpRegulator();
-		while (!LL_PWR_IsEnabledBkUpRegulator()) {
-		}
+	ret = stm32_backup_sram_enable_retention();
+	if (ret < 0) {
+		LOG_ERR("Could not enable backup SRAM retention (%d)", ret);
+		return ret;
 	}
 
 	return 0;
