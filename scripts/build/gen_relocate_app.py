@@ -362,7 +362,8 @@ def section_kinds_from_memory_region(memory_region: str) -> 'tuple[set[SectionKi
     In addition to the parsed kinds, the input region minus specifiers for those
     kinds is returned.
 
-    >>> section_kinds_from_memory_region('SRAM2_TEXT') == ({SectionKind.TEXT, SectionKind.EXIDX}, 'SRAM2')
+    >>> section_kinds_from_memory_region('SRAM2_TEXT') == ({
+    ...     SectionKind.TEXT, SectionKind.EXIDX}, 'SRAM2')
     True
     """
     out = set()
