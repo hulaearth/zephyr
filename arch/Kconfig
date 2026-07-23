@@ -293,6 +293,18 @@ config XIP
 	  supply a linker command file when building your image. Enabling this
 	  option increases both the code and data footprint of the image.
 
+config ARCH_DATA_COPY_FOR_RAM_LOAD_SPLIT
+	bool "Copy initialized data for split RAM-load images"
+	depends on !XIP
+	help
+	  Copy the initialized data section from its load address to its runtime
+	  virtual memory address during early architecture startup for non-XIP
+	  RAM-load images. This is needed when the image is loaded by a
+	  bootloader into one memory region but the text and data virtual
+	  addresses are mapped to a different memory region, such as when
+	  executing from PSRAM while the image was loaded into a separate
+	  staging area.
+
 
 if ARC || ARM || ARM64 || X86 || RISCV || RX || OPENRISC || ARCH_POSIX
 

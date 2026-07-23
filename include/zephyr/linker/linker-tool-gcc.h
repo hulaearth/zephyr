@@ -126,16 +126,17 @@
  *
  * Route memory for read-write sections that are loaded.
  *
- * Used for initialized data sections that on XIP platforms must be copied at
- * startup.
+ * Used for initialized data sections that must be copied at startup, such as
+ * XIP or split RAM-load images.
  *
  * @param vregion Output VMA
- * @param lregion Output LMA (only used if CONFIG_MMU if VMA != LMA,
- *		  or CONFIG_XIP)
+ * @param lregion Output LMA (only used for CONFIG_MMU when VMA != LMA,
+ *		  CONFIG_XIP, or CONFIG_ARCH_DATA_COPY_FOR_RAM_LOAD_SPLIT)
  */
 #if defined(CONFIG_ARCH_POSIX)
 #define GROUP_DATA_LINK_IN(vregion, lregion)
-#elif defined(CONFIG_XIP) || defined(K_MEM_IS_VM_KERNEL)
+#elif defined(CONFIG_XIP) || defined(K_MEM_IS_VM_KERNEL) || \
+	defined(CONFIG_ARCH_DATA_COPY_FOR_RAM_LOAD_SPLIT)
 #define GROUP_DATA_LINK_IN(vregion, lregion) > vregion AT > lregion
 #else
 #define GROUP_DATA_LINK_IN(vregion, lregion) > vregion
