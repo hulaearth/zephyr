@@ -154,6 +154,18 @@ static const struct z_arm_mpu_partition static_regions[] = {
  */
 void z_arm_configure_static_mpu_regions(void)
 {
+	struct z_arm_mpu_partition nonzero_static_regions[ARRAY_SIZE(static_regions)];
+	uint8_t nonzero_static_regions_num = 0U;
+
+	for (size_t i = 0U; i < ARRAY_SIZE(static_regions); i++) {
+		if (static_regions[i].size == 0U) {
+			continue;
+		}
+
+		nonzero_static_regions[nonzero_static_regions_num] = static_regions[i];
+		nonzero_static_regions_num++;
+	}
+
 	/* Configure the static MPU regions within firmware SRAM boundaries.
 	 * Start address of the image is given by _image_ram_start. The end
 	 * of the firmware SRAM area is marked by __kernel_ram_end, taking
@@ -162,8 +174,8 @@ void z_arm_configure_static_mpu_regions(void)
 #ifdef CONFIG_AARCH32_ARMV8_R
 	arm_core_mpu_disable();
 #endif
-	arm_core_mpu_configure_static_mpu_regions(static_regions,
-		ARRAY_SIZE(static_regions),
+	arm_core_mpu_configure_static_mpu_regions(nonzero_static_regions,
+		nonzero_static_regions_num,
 		(uint32_t)&_image_ram_start,
 		(uint32_t)&__kernel_ram_end);
 #ifdef CONFIG_AARCH32_ARMV8_R
