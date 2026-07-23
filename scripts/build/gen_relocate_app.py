@@ -67,6 +67,7 @@ LLEXT_HEAP_SECTIONS = (
 
 class SectionKind(Enum):
     TEXT = "text"
+    EXIDX = "exidx"
     RODATA = "rodata"
     DATA = "data"
     BSS = "bss"
@@ -81,22 +82,26 @@ class SectionKind(Enum):
         """
         Return the kind of section that includes a section with the given name.
 
-        >>> SectionKind.for_section_with_name(".rodata.str1.4")
+        >>> SectionKind.for_section_named(".rodata.str1.4")
         <SectionKind.RODATA: 'rodata'>
-        >>> SectionKind.for_section_with_name(".device_deps")
-        None
+        >>> SectionKind.for_section_named(".device_deps") is None
+        True
         """
-        if ".text." in name:
+        if name.startswith((".rel", ".rela")):
+            return None
+        if name.startswith(".ARM.exidx"):
+            return cls.EXIDX
+        elif name.startswith(".text."):
             return cls.TEXT
-        elif ".rodata." in name:
+        elif name.startswith(".rodata."):
             return cls.RODATA
-        elif ".data." in name:
+        elif name.startswith(".data."):
             return cls.DATA
-        elif ".bss." in name:
+        elif name.startswith(".bss."):
             return cls.BSS
-        elif ".noinit." in name or name in LLEXT_HEAP_SECTIONS:
+        elif name.startswith(".noinit.") or name in LLEXT_HEAP_SECTIONS:
             return cls.NOINIT
-        elif ".literal." in name:
+        elif name.startswith(".literal."):
             return cls.LITERAL
         else:
             return None
@@ -117,7 +122,17 @@ PRINT_TEMPLATE_NOKEEP = """
 """
 
 SECTION_LOAD_MEMORY_SEQ = """
-        __{mem}_{kind}_rom_start = LOADADDR(.{mem}_{kind}_reloc);
+        __{mem}_{kind}_rom_start = LOADADDR({section_name});
+"""
+
+DISCARD_SECTION_SEQ = """
+
+/* Discard sections for relocated {kind_name} entries that cannot remain in ROM. */
+
+	/DISCARD/ :
+        {{
+                {linker_sections}
+	}}
 """
 
 LOAD_ADDRESS_LOCATION_FLASH = """
@@ -153,14 +168,14 @@ LINKER_SECTION_SEQ = """
 
 /* Linker section for memory region {mem_upper} for {kind_name} section  */
 
-	SECTION_PROLOGUE(.{mem}_{kind}_reloc,{options},)
+	SECTION_PROLOGUE({section_name},{options},)
         {{
                 . = ALIGN(4);
                 {linker_sections}
                 . = ALIGN(4);
 	}} {load_address}
         __{mem}_{kind}_reloc_end = .;
-        __{mem}_{kind}_reloc_start = ADDR(.{mem}_{kind}_reloc);
+        __{mem}_{kind}_reloc_start = ADDR({section_name});
         __{mem}_{kind}_reloc_size = __{mem}_{kind}_reloc_end - __{mem}_{kind}_reloc_start;
 """
 
@@ -168,7 +183,7 @@ LINKER_SECTION_SEQ_MPU = """
 
 /* Linker section for memory region {mem_upper} for {kind_name} section  */
 
-	SECTION_PROLOGUE(.{mem}_{kind}_reloc,{options},)
+	SECTION_PROLOGUE({section_name},{options},)
         {{
                 __{mem}_{kind}_reloc_start = .;
                 {linker_sections}
@@ -293,14 +308,13 @@ def assign_to_correct_mem_region(
     """
     use_section_kinds, memory_region = section_kinds_from_memory_region(memory_region)
 
-    # Split |COPY/|NOKEEP flags before the numeric align suffix, else a region
-    # like "SRAM_4|COPY" makes int("4|COPY") throw.
-    memory_region, sep, flags = memory_region.partition('|')
-    flags = sep + flags
-    memory_region, _, align_size = memory_region.partition('_')
+    memory_region, *flags = memory_region.split('|')
+    memory_region, align_size = split_alignment_suffix(memory_region)
     if align_size:
         mpu_align[memory_region] = int(align_size)
-    memory_region = memory_region + flags
+
+    if flags:
+        memory_region = '|'.join((memory_region, *flags))
 
     keep_sections = '|NOKEEP' not in memory_region
     memory_region = memory_region.replace('|NOKEEP', '')
@@ -315,6 +329,29 @@ def assign_to_correct_mem_region(
     return {MemoryRegion(memory_region): output_sections}
 
 
+def split_alignment_suffix(memory_region: str) -> 'tuple[str, str]':
+    """
+    Split a final MPU alignment suffix from a memory region name.
+
+    Only a final underscore followed by decimal digits is an alignment suffix;
+    underscores elsewhere are part of the memory-region name.
+
+    >>> split_alignment_suffix('SRAM_FAST')
+    ('SRAM_FAST', '')
+    >>> split_alignment_suffix('SRAM_FAST_32')
+    ('SRAM_FAST', '32')
+    >>> split_alignment_suffix('SRAM_FAST_TEXT')
+    ('SRAM_FAST_TEXT', '')
+    >>> split_alignment_suffix('SRAM2_256')
+    ('SRAM2', '256')
+    """
+    memory_region_base, sep, align_size = memory_region.rpartition('_')
+    if sep and align_size.isdecimal():
+        return memory_region_base, align_size
+
+    return memory_region, ''
+
+
 def section_kinds_from_memory_region(memory_region: str) -> 'tuple[set[SectionKind], str]':
     """
     Get the section kinds requested by the given memory region name.
@@ -325,8 +362,8 @@ def section_kinds_from_memory_region(memory_region: str) -> 'tuple[set[SectionKi
     In addition to the parsed kinds, the input region minus specifiers for those
     kinds is returned.
 
-    >>> section_kinds_from_memory_region('SRAM2_TEXT')
-    ({<SectionKind.TEXT: 'text'>}, 'SRAM2')
+    >>> section_kinds_from_memory_region('SRAM2_TEXT') == ({SectionKind.TEXT, SectionKind.EXIDX}, 'SRAM2')
+    True
     """
     out = set()
     for kind in SectionKind:
@@ -337,6 +374,10 @@ def section_kinds_from_memory_region(memory_region: str) -> 'tuple[set[SectionKi
     if not out:
         # No listed kinds implies all of the kinds
         out = set(SectionKind)
+    elif SectionKind.TEXT in out:
+        # ARM EHABI unwind index entries contain PREL31 references to their
+        # covered text and must stay within range of relocated functions.
+        out.add(SectionKind.EXIDX)
     return (out, memory_region)
 
 
@@ -381,7 +422,12 @@ def string_create_helper(
         # Create a complete list of funcs/ variables that goes in for this
         # memory type
         tmp = print_linker_sections(full_list_of_sections[kind])
-        if region_is_default_ram(memory_type) and kind in (
+        if kind is SectionKind.EXIDX:
+            linker_string += DISCARD_SECTION_SEQ.format(
+                kind_name=kind,
+                linker_sections=tmp,
+            )
+        elif region_is_default_ram(memory_type) and kind in (
             SectionKind.DATA,
             SectionKind.BSS,
             SectionKind.NOINIT,
@@ -396,6 +442,9 @@ def string_create_helper(
                 "linker_sections": tmp,
                 "load_address": load_address_string,
                 "options": "(NOLOAD)" if kind is SectionKind.NOINIT else "",
+                "section_name": f".ARM.exidx.{memory_type.lower()}_reloc"
+                if kind is SectionKind.EXIDX
+                else f".{memory_type.lower()}_{kind.value}_reloc",
             }
 
             if not region_is_default_ram(memory_type) and kind is SectionKind.RODATA:
@@ -442,6 +491,9 @@ def generate_linker_script(
         )
         gen_string += string_create_helper(
             SectionKind.TEXT, memory_type, full_list_of_sections, True, is_copy, phdrs
+        )
+        gen_string += string_create_helper(
+            SectionKind.EXIDX, memory_type, full_list_of_sections, True, is_copy, phdrs
         )
         gen_string += string_create_helper(
             SectionKind.RODATA, memory_type, full_list_of_sections, True, is_copy, phdrs
