@@ -1,0 +1,13 @@
+# Copyright (c) 2026 The Zephyr Project Contributors
+#
+# SPDX-License-Identifier: Apache-2.0
+
+tests:
+  soc.stm32n6.cache_management_default:
+    build_only: true
+    tags:
+      - cache
+    platform_allow:
+      - stm32n6570_dk/stm32n657xx/sb
+    integration_platforms:
+      - stm32n6570_dk/stm32n657xx/sb
