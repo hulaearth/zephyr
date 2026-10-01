@@ -15,15 +15,22 @@
 #include <zephyr/logging/log.h>
 #include <zephyr/cpu_freq/cpu_freq.h>
 
+#if defined(CONFIG_SOC_SERIES_STM32N6X)
+#include <soc.h>
+#endif
+
 #define NUM_THREADS (2 * (CONFIG_MP_MAX_NUM_CPUS - 1))
 
+#if defined(CONFIG_CLOCK_STM32_N6_CPU_SCALING)
+/* Keep the sweep short at 16 MHz; interrupts service the system timer. */
+#define BENCH_ITERATIONS 200000U
+#else
 /*
- * Iterations of the benchmark loop. Sized so that the loop takes roughly ten
- * milliseconds on a 1 GHz class core: long enough to swamp the measurement
- * overhead, short enough that the interrupt lock below is not held for a
- * disruptive amount of time and that a 24-bit system counter cannot wrap.
+ * Run for roughly ten milliseconds on a 1 GHz core. Keep the interrupt
+ * lock short enough that a 24-bit system counter cannot wrap.
  */
 #define BENCH_ITERATIONS 2000000U
+#endif
 
 #define BENCH_STACK_SIZE 2048
 
@@ -33,6 +40,14 @@ const struct pstate *soc_pstates_dt[] = {
 	DT_FOREACH_CHILD_STATUS_OKAY_SEP(DT_PATH(performance_states), PSTATE_DT_GET, (,))};
 
 #define NUM_PSTATES ARRAY_SIZE(soc_pstates_dt)
+
+#if defined(CONFIG_SOC_SERIES_STM32N6X) && defined(CONFIG_CPU_FREQ_PSTATE_SET_SOC) && \
+	DT_HAS_COMPAT_STATUS_OKAY(st_stm32n6_pstate)
+#define PSTATE_FREQUENCY(node_id) DT_PROP(node_id, clock_frequency)
+static const uint32_t pstate_frequencies[] = {
+	DT_FOREACH_CHILD_STATUS_OKAY_SEP(DT_PATH(performance_states), PSTATE_FREQUENCY, (,))
+};
+#endif
 
 /*
  * One P-state sweep, as measured by pstate_benchmark_run(). The benchmark runs
@@ -170,6 +185,15 @@ ZTEST(cpu_freq_soc, test_soc_pstates)
 		k_sched_unlock();
 #endif
 		zassert_equal(ret, 0, "Failed to set P-state %d", i);
+
+#if defined(CONFIG_SOC_SERIES_STM32N6X) && defined(CONFIG_CPU_FREQ_PSTATE_SET_SOC) && \
+	DT_HAS_COMPAT_STATUS_OKAY(st_stm32n6_pstate)
+		zassert_equal(SystemCoreClock, pstate_frequencies[i],
+			      "CPU frequency does not match P-state %d", i);
+		zassert_equal(sys_clock_hw_cycles_per_sec(), CONFIG_SYS_CLOCK_HW_CYCLES_PER_SEC,
+			      "Fixed system timer frequency changed");
+		k_sleep(K_MSEC(2));
+#endif
 	}
 
 #if defined(CONFIG_SMP) && (CONFIG_MP_MAX_NUM_CPUS > 1)
@@ -181,7 +205,7 @@ ZTEST(cpu_freq_soc, test_soc_pstates)
 
 /*
  * Fixed integer workload. It touches no memory beyond a register or two, so
- * the time it takes is a function of the core clock and nothing else.
+ * its duration indicates CPU throughput, including any interrupt overhead.
  */
 static void cpu_benchmark(void)
 {
@@ -200,12 +224,6 @@ static void cpu_benchmark(void)
  * this thread is pinned to. No assertion is made here, see struct
  * bench_result: the results are checked by bench_result_check() on the test
  * thread.
- *
- * The cycle counter is the system timer, which on an SoC where the P-state
- * only reprograms the core clock keeps running at a fixed rate. A faster core
- * therefore finishes the workload sooner, so the reported durations are
- * expected to grow as the P-state table moves from the highest performance
- * state to the lowest.
  */
 static void pstate_benchmark_run(void *p1, void *p2, void *p3)
 {
@@ -224,9 +242,14 @@ static void pstate_benchmark_run(void *p1, void *p2, void *p3)
 		/*
 		 * Locking interrupts keeps the current CPU fixed, as
 		 * cpu_freq_pstate_set() requires, and keeps interrupt handling
-		 * out of the measured window.
+		 * out of the measured window. On single-core STM32N6, leave
+		 * interrupts enabled so timer interrupts are serviced at low CPU
+		 * rates. The long policy interval keeps the P-state fixed.
 		 */
-		key = irq_lock();
+		key = 0U;
+		if (!IS_ENABLED(CONFIG_CLOCK_STM32_N6_CPU_SCALING)) {
+			key = irq_lock();
+		}
 
 		res->ret[i] = cpu_freq_pstate_set(soc_pstates_dt[i]);
 		if (res->ret[i] == 0) {
@@ -241,7 +264,9 @@ static void pstate_benchmark_run(void *p1, void *p2, void *p3)
 			res->cycles[i] = cycles;
 		}
 
-		irq_unlock(key);
+		if (!IS_ENABLED(CONFIG_CLOCK_STM32_N6_CPU_SCALING)) {
+			irq_unlock(key);
+		}
 	}
 
 	/* Restore the highest P-state. */
@@ -278,8 +303,9 @@ static void bench_result_check(const struct bench_result *res)
  */
 ZTEST(cpu_freq_soc, test_pstate_benchmark)
 {
-	if (!IS_ENABLED(CONFIG_TIMER_HAS_64BIT_CYCLE_COUNTER)) {
-		/* k_cycle_get_64() asserts and returns 0 without it. */
+	if (!IS_ENABLED(CONFIG_TIMER_HAS_64BIT_CYCLE_COUNTER) &&
+	    !IS_ENABLED(CONFIG_CLOCK_STM32_N6_CPU_SCALING)) {
+		/* Keep other 32-bit timer platforms outside this benchmark. */
 		ztest_test_skip();
 	}
 
