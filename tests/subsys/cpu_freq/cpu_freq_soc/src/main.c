@@ -230,9 +230,15 @@ static void pstate_benchmark_run(void *p1, void *p2, void *p3)
 
 		res->ret[i] = cpu_freq_pstate_set(soc_pstates_dt[i]);
 		if (res->ret[i] == 0) {
-			start = k_cycle_get_64();
+			/* Unsigned subtraction permits one 32-bit counter wrap. */
+			start = IS_ENABLED(CONFIG_TIMER_HAS_64BIT_CYCLE_COUNTER) ? k_cycle_get_64()
+										 : k_cycle_get_32();
 			cpu_benchmark();
-			res->cycles[i] = k_cycle_get_64() - start;
+			uint64_t cycles = IS_ENABLED(CONFIG_TIMER_HAS_64BIT_CYCLE_COUNTER)
+						  ? k_cycle_get_64() - start
+						  : (uint32_t)(k_cycle_get_32() - (uint32_t)start);
+
+			res->cycles[i] = cycles;
 		}
 
 		irq_unlock(key);
