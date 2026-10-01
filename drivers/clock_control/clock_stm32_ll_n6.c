@@ -16,6 +16,8 @@
 #include <zephyr/drivers/clock_control.h>
 #include <zephyr/drivers/clock_control/stm32_clock_control.h>
 #include <zephyr/sys/util.h>
+#include <zephyr/sys/barrier.h>
+#include <zephyr/irq.h>
 #include <stm32_backup_domain.h>
 
 /* Macros to fill up prescaler values */
@@ -33,6 +35,100 @@
 #define PLL3_ID		3
 #define PLL4_ID		4
 
+
+#if defined(CONFIG_CLOCK_STM32_N6_CPU_SCALING)
+BUILD_ASSERT(IS_ENABLED(STM32_CPUCLK_SRC_IC1) && IS_ENABLED(STM32_IC1_ENABLED),
+	     "STM32N6 CPU scaling requires IC1 as the CPU clock source");
+
+/* Access the fixed PLL selected for IC1 by devicetree. */
+#define CPU_PLL_NAME CONCAT(LL_RCC_PLL, STM32_IC1_PLL_SRC)
+#define CPU_PLL(op) CONCAT(CPU_PLL_NAME, op)()
+#define CPU_BOOT_RATE DT_PROP(DT_NODELABEL(cpusw), clock_frequency)
+
+static int get_cpu_pll_rate(uint64_t *rate)
+{
+	uint64_t numerator;
+	uint64_t denominator;
+	uint32_t source = CPU_PLL(_GetSource);
+
+	if (LL_RCC_GetCpuClkSource() != LL_RCC_CPU_CLKSOURCE_STATUS_IC1 ||
+	    LL_RCC_IC1_GetSource() != ic_src_pll(STM32_IC1_PLL_SRC)) {
+		return -ENOTSUP;
+	}
+	if (LL_RCC_IC1_IsEnabled() != 1U || CPU_PLL(_IsReady) != 1U) {
+		return -EAGAIN;
+	}
+	/* A varying or fractional parent cannot provide the exact integer rate contract. */
+	if (CPU_PLL(_IsEnabledBypass) != 0U || CPU_PLL(_GetFRACN) != 0U ||
+	    CPU_PLL(_IsEnabledModulationSpreadSpectrum) != 0U ||
+	    CPU_PLL(_IsEnabledFractionalModulationSpreadSpectrum) != 0U) {
+		return -ENOTSUP;
+	}
+
+	if (source == LL_RCC_PLLSOURCE_HSI && IS_ENABLED(STM32_HSI_ENABLED)) {
+		if (LL_RCC_HSI_IsReady() != 1U) {
+			return -EAGAIN;
+		}
+		numerator = STM32_HSI_FREQ;
+		denominator = 1U << (LL_RCC_HSI_GetDivider() >> RCC_HSICFGR_HSIDIV_Pos);
+	} else if (source == LL_RCC_PLLSOURCE_HSE && IS_ENABLED(STM32_HSE_ENABLED)) {
+		if (LL_RCC_HSE_IsReady() != 1U) {
+			return -EAGAIN;
+		}
+		numerator = STM32_HSE_FREQ;
+		denominator = 1U;
+	} else {
+		return -ENOTSUP;
+	}
+
+	numerator *= CPU_PLL(_GetN);
+	denominator *= (uint64_t)CPU_PLL(_GetM) * CPU_PLL(_GetP1) * CPU_PLL(_GetP2);
+	if (denominator == 0U || numerator == 0U || numerator % denominator != 0U) {
+		return -ENOTSUP;
+	}
+	*rate = numerator / denominator;
+	/* Also checks the fixed parent retained by a chain-loading bootloader. */
+	if (*rate != (uint64_t)CPU_BOOT_RATE * STM32_IC1_DIV) {
+		return -ENOTSUP;
+	}
+	return 0;
+}
+
+int stm32_clock_control_set_cpu_rate(uint32_t hz)
+{
+	uint64_t parent_rate;
+	uint64_t divider;
+	uint32_t actual_rate;
+	unsigned int key = irq_lock();
+	int ret;
+
+	if (hz == 0U || hz > MIN(800000000U, CPU_BOOT_RATE)) {
+		ret = -EINVAL;
+		goto out;
+	}
+	ret = get_cpu_pll_rate(&parent_rate);
+	if (ret != 0) {
+		goto out;
+	}
+	divider = parent_rate / hz;
+	if (parent_rate % hz != 0U || divider < 1U || divider > 256U) {
+		ret = -EINVAL;
+		goto out;
+	}
+	if (divider == LL_RCC_IC1_GetDivider()) {
+		goto out;
+	}
+
+	LL_RCC_IC1_SetDivider((uint32_t)divider);
+	barrier_dsync_fence_full();
+	barrier_isync_fence_full();
+	actual_rate = (uint32_t)(parent_rate / LL_RCC_IC1_GetDivider());
+	SystemCoreClock = actual_rate;
+out:
+	irq_unlock(key);
+	return ret;
+}
+#endif /* CONFIG_CLOCK_STM32_N6_CPU_SCALING */
 
 static uint32_t get_bus_clock(uint32_t clock, uint32_t prescaler)
 {
@@ -120,7 +216,8 @@ static uint32_t get_pllout_frequency(int pll_id)
 
 	__ASSERT_NO_MSG(pllm_div && pllout_div1 && pllout_div2);
 
-	return (pllsrc_freq / pllm_div) * plln_mul / (pllout_div1 * pllout_div2);
+	return (uint64_t)pllsrc_freq * plln_mul /
+	       ((uint64_t)pllm_div * pllout_div1 * pllout_div2);
 }
 
 __unused uint32_t get_icout_frequency(uint32_t icsrc, int div)
@@ -382,7 +479,19 @@ static int stm32_clock_control_get_subsys_rate(const struct device *dev,
 #endif /* STM32_CKPER_ENABLED */
 #if defined(STM32_IC1_ENABLED)
 	case STM32_SRC_IC1:
-		*rate = get_icout_frequency(LL_RCC_IC1_GetSource(), STM32_IC1_DIV);
+#if defined(CONFIG_CLOCK_STM32_N6_CPU_SCALING)
+		{
+			uint64_t parent_rate;
+			int ret = get_cpu_pll_rate(&parent_rate);
+
+			if (ret != 0) {
+				return ret;
+			}
+			*rate = (uint32_t)(parent_rate / LL_RCC_IC1_GetDivider());
+		}
+#else
+		*rate = get_icout_frequency(LL_RCC_IC1_GetSource(), LL_RCC_IC1_GetDivider());
+#endif
 		break;
 #endif /* STM32_IC1_ENABLED */
 #if defined(STM32_IC2_ENABLED)
