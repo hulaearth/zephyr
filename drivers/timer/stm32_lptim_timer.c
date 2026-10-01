@@ -72,6 +72,7 @@ static const struct reset_dt_spec lptim_reset = RESET_DT_SPEC_GET(LPTIM_SYSTIMER
  *    0xFFFF / (LSE freq (32768Hz) / 128)
  */
 
+/* Maximum period in counter cycles; ARR contains one less than this value. */
 static int32_t lptim_time_base;
 static uint32_t lptim_clock_freq = CONFIG_STM32_LPTIM_CLOCK;
 /* The prescaler given by the DTS and to apply to the lptim_clock_freq */
@@ -594,9 +595,9 @@ static int sys_clock_driver_init(void)
 #else
 	/* Set LPTIM time base based on clock source freq */
 	if (lptim_clock_freq == KHZ(32)) {
-		lptim_time_base = 0xF9FF;
+		lptim_time_base = 0xFA00;
 	} else if (lptim_clock_freq == 32768) {
-		lptim_time_base = 0xFFFF;
+		lptim_time_base = 0x10000;
 	} else {
 		return -EIO;
 	}
@@ -682,7 +683,7 @@ static int sys_clock_driver_init(void)
 	/* Set the Autoreload value once the timer is enabled */
 	if (IS_ENABLED(CONFIG_TICKLESS_KERNEL)) {
 		/* LPTIM is triggered on a LPTIM_TIMEBASE period */
-		lptim_set_autoreload(lptim_time_base);
+		lptim_set_autoreload(lptim_time_base - 1);
 	} else {
 		/* nb of LPTIM counter unit per kernel tick (depends on lptim clock prescaler) */
 		count_per_tick = (lptim_clock_freq / CONFIG_SYS_CLOCK_TICKS_PER_SEC);
