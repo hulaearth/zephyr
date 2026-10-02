@@ -71,6 +71,7 @@ struct stm32_sai_sub_data {
 	SAI_HandleTypeDef hsai;
 	DMA_HandleTypeDef hdma;
 	struct stream stream;
+	struct queue_item queue_buffer[CONFIG_I2S_STM32_SAI_BLOCK_COUNT];
 };
 
 struct stm32_sai_sub_cfg {
@@ -392,12 +393,8 @@ static int sai_sub_init(const struct device *dev)
 		return -ENODEV;
 	}
 
-	ret = k_msgq_alloc_init(&sub_data->stream.queue, sizeof(struct queue_item),
-				CONFIG_I2S_STM32_SAI_BLOCK_COUNT);
-	if (ret < 0) {
-		LOG_ERR("k_msgq_alloc_init(): <FAILED>, ret: %d", ret);
-		return ret;
-	}
+	k_msgq_init(&stream->queue, (char *)sub_data->queue_buffer, sizeof(struct queue_item),
+		    ARRAY_SIZE(sub_data->queue_buffer));
 
 	/* Initialize DMA */
 	ret = sai_sub_dma_init(dev);
@@ -1022,9 +1019,7 @@ static DEVICE_API(i2s, i2s_stm32_sai_api) = {
 		.dir = COND_CODE_1(DT_DMAS_HAS_NAME(node, tx), (I2S_DIR_TX), (I2S_DIR_RX)),        \
 	};                                                                                         \
 	DEVICE_DT_DEFINE(node, &sai_sub_init, NULL, &sub_data_##node, &sub_cfg_##node,             \
-			 POST_KERNEL, CONFIG_I2S_INIT_PRIORITY, &i2s_stm32_sai_api);               \
-	K_MSGQ_DEFINE_STATIC_TYPE(queue_##node, struct queue_item,                                 \
-				  CONFIG_I2S_STM32_SAI_BLOCK_COUNT);
+			 POST_KERNEL, CONFIG_I2S_INIT_PRIORITY, &i2s_stm32_sai_api);
 
 #define SAI_KER_CK_FIELD_INIT(inst, n)                                                             \
 	COND_CODE_1(DT_INST_CLOCKS_HAS_NAME(inst, n),                                              \
