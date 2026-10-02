@@ -14,6 +14,25 @@ tests:
       - native_sim
       - native_sim/native/64
 
+  subsys.cpu_freq.soc.stm32n6:
+    extra_dtc_overlay_files:
+      - pstate-stm32n6.overlay
+    platform_allow:
+      - nucleo_n657x0_q/stm32n657xx/sb
+      - stm32n6570_dk/stm32n657xx/sb
+    integration_platforms:
+      - nucleo_n657x0_q/stm32n657xx/sb
+      - stm32n6570_dk/stm32n657xx/sb
+    extra_configs:
+      - CONFIG_CORTEX_M_SYSTICK=n
+      - CONFIG_STM32_LPTIM_TIMER=y
+      - CONFIG_SYS_CLOCK_HW_CYCLES_PER_SEC=32768
+      - CONFIG_SYS_CLOCK_TICKS_PER_SEC=4096
+      - CONFIG_PM=n
+      - CONFIG_CPU_FREQ_POLICY_ON_DEMAND=n
+      - CONFIG_CPU_FREQ_POLICY_PRESSURE=y
+      - CONFIG_CPU_FREQ_PSTATE_SET_SOC=y
+
   # Use the stub version of cpu_freq_pstate_set()
   subsys.cpu_freq.stub:
     extra_dtc_overlay_files:
