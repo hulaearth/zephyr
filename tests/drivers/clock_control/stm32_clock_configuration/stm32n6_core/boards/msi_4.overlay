@@ -1,0 +1,33 @@
+/*
+ * SPDX-FileCopyrightText: Copyright The Zephyr Project Contributors
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+&clk_msi {
+	status = "okay";
+	msi-range = <0>;
+};
+
+&clk_hsi {
+	status = "okay";
+	hsi-div = <1>;
+};
+
+&cpusw {
+	clocks = <&rcc STM32_SRC_MSI CPU_SEL(1)>;
+	clock-frequency = <DT_FREQ_M(4)>;
+};
+
+&perck {
+	clocks = <&rcc STM32_SRC_HSI PER_SEL(0)>;
+};
+
+&rcc {
+	clocks = <&clk_msi>;
+	clock-frequency = <DT_FREQ_M(4)>;
+	ahb-prescaler = <1>;
+	apb1-prescaler = <1>;
+	apb2-prescaler = <1>;
+	apb4-prescaler = <1>;
+	apb5-prescaler = <1>;
+};

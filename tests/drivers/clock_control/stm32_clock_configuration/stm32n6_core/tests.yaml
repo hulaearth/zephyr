@@ -6,6 +6,10 @@ common:
   integration_platforms:
     - stm32n6570_dk/stm32n657xx/sb
 tests:
+  drivers.clock.stm32_clock_configuration.n6.msi_4:
+    extra_args: DTC_OVERLAY_FILE="boards/clear_clocks.overlay;boards/msi_4.overlay"
+  drivers.clock.stm32_clock_configuration.n6.msi_16_ahb_8:
+    extra_args: DTC_OVERLAY_FILE="boards/clear_clocks.overlay;boards/msi_16_ahb_8.overlay"
   drivers.clock.stm32_clock_configuration.n6.hsi_64:
     extra_args: DTC_OVERLAY_FILE="boards/clear_clocks.overlay;boards/hsi_64.overlay"
   drivers.clock.stm32_clock_configuration.n6.cpu_pll_hsi_600_sysclk_pll_hsi_400:

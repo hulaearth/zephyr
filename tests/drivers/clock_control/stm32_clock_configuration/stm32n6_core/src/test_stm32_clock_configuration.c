@@ -6,6 +6,7 @@
 
 #include <soc.h>
 #include <stm32_bitops.h>
+#include <zephyr/drivers/clock_control.h>
 #include <zephyr/drivers/clock_control/stm32_clock_control.h>
 #include <zephyr/ztest.h>
 
@@ -16,6 +17,29 @@ ZTEST(stm32n6_clock_core_config, test_cpuclk_freq)
 	zassert_equal(CONFIG_SYS_CLOCK_HW_CYCLES_PER_SEC, cpuclk_freq,
 		      "Expected cpuclk_freq: %d. Actual cupclk_freq: %d",
 		      CONFIG_SYS_CLOCK_HW_CYCLES_PER_SEC, cpuclk_freq);
+}
+
+ZTEST(stm32n6_clock_core_config, test_bus_rates)
+{
+	const struct device *dev = DEVICE_DT_GET(STM32_CLOCK_CONTROL_NODE);
+	struct stm32_pclken clock = {.bus = STM32_SRC_SYSCLK, .enr = NO_SEL};
+	uint32_t rate;
+	int ret;
+
+	zassert_true(device_is_ready(dev));
+	ret = clock_control_get_rate(dev, (clock_control_subsys_t)&clock, &rate);
+	zassert_ok(ret);
+	zassert_equal(rate, HAL_RCC_GetSysClockFreq(), "Incorrect SYSCLK rate");
+
+	clock.bus = STM32_CLOCK_BUS_AHB1;
+	ret = clock_control_get_rate(dev, (clock_control_subsys_t)&clock, &rate);
+	zassert_ok(ret);
+	zassert_equal(rate, HAL_RCC_GetHCLKFreq(), "Incorrect AHB rate");
+
+	clock.bus = STM32_CLOCK_BUS_APB1;
+	ret = clock_control_get_rate(dev, (clock_control_subsys_t)&clock, &rate);
+	zassert_ok(ret);
+	zassert_equal(rate, HAL_RCC_GetPCLK1Freq(), "Incorrect APB1 rate");
 }
 
 ZTEST(stm32n6_clock_core_config, test_cpuclk_src)
