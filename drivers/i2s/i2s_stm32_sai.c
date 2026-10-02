@@ -573,6 +573,11 @@ static int stm32_sai_sub_conf(const struct device *dev, enum i2s_dir dir,
 
 	/* AudioFrequency */
 	switch (stream->i2s_cfg.frame_clk_freq) {
+#if defined(SAI_AUDIO_FREQUENCY_384K)
+	case 384000U:
+		hsai->Init.AudioFrequency = SAI_AUDIO_FREQUENCY_384K;
+		break;
+#endif
 	case 192000U:
 		hsai->Init.AudioFrequency = SAI_AUDIO_FREQUENCY_192K;
 		break;
