@@ -6,16 +6,18 @@ description: |
 
   It can be used to describe 4 different PLLs: PLL1, PLL2, PLL3 and PLL4.
 
-  These PLLs can take one of clk_hse, clk_hsi or clk_msi as input clock, with
-  an input frequency from 5 to 50 MHz. PLLM factor is used to set the input
-  clock in this acceptable range.
+  These PLLs can take one of clk_hse, clk_hsi or clk_msi as input clock.
+  PLLM divides the source clock to obtain the phase detector frequency,
+  which must be between 5 and 50 MHz in integer mode. In fractional mode,
+  it must be between 10 MHz and the smaller of 50 MHz and the VCO frequency
+  divided by 20. The VCO frequency must be between 800 and 3200 MHz.
 
   Each PLL has one output clock whose frequency can be computed with the
   following formula:
 
     f(PLL_P) = f(VCO clock) / (PLLP1 × PLLP2)
 
-      with f(VCO clock) = f(PLL clock input) × (PLLN / PLLM)
+      with f(VCO clock) = f(PLL clock input) × (PLLN + FRACN / 2^24) / PLLM
 
   Note: To reduce the power consumption, it is recommended to configure the VCOx
         clock output to the lowest frequency.
@@ -64,3 +66,12 @@ properties:
         PLLx DIVP2 division factor
     min: 1
     max: 7
+
+  fracn:
+    type: int
+    default: 0
+    description: |
+        PLLx fractional multiplication factor. The VCO multiplier is
+        mul-n + fracn / 2^24. A nonzero value enables fractional mode.
+    min: 0
+    max: 16777215
