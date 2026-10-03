@@ -6,4 +6,19 @@ common:
   platform_allow: [native_sim, native_sim/native/64]
   integration_platforms: [native_sim/native/64]
 tests:
-  drivers.sensor.ens210: {}
+  drivers.sensor.ens210.single:
+    extra_configs:
+      - CONFIG_ENS210_TEMPERATURE_SINGLE=y
+      - CONFIG_ENS210_HUMIDITY_SINGLE=y
+  drivers.sensor.ens210.temperature_single:
+    extra_configs:
+      - CONFIG_ENS210_TEMPERATURE_SINGLE=y
+      - CONFIG_ENS210_HUMIDITY_CONTINUOUS=y
+  drivers.sensor.ens210.humidity_single:
+    extra_configs:
+      - CONFIG_ENS210_TEMPERATURE_CONTINUOUS=y
+      - CONFIG_ENS210_HUMIDITY_SINGLE=y
+  drivers.sensor.ens210.continuous:
+    extra_configs:
+      - CONFIG_ENS210_TEMPERATURE_CONTINUOUS=y
+      - CONFIG_ENS210_HUMIDITY_CONTINUOUS=y
