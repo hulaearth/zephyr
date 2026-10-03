@@ -6,7 +6,9 @@
 
 #include <soc.h>
 #include <stm32_bitops.h>
+#include <stm32_ll_rcc.h>
 #include <zephyr/drivers/clock_control/stm32_clock_control.h>
+#include <zephyr/init.h>
 #include <zephyr/ztest.h>
 
 ZTEST(stm32n6_clock_core_config, test_cpuclk_freq)
@@ -17,6 +19,49 @@ ZTEST(stm32n6_clock_core_config, test_cpuclk_freq)
 		      "Expected cpuclk_freq: %d. Actual cupclk_freq: %d",
 		      CONFIG_SYS_CLOCK_HW_CYCLES_PER_SEC, cpuclk_freq);
 }
+
+ZTEST(stm32n6_clock_core_config, test_bus_rates)
+{
+	const struct device *const clk = DEVICE_DT_GET(DT_NODELABEL(rcc));
+	struct stm32_pclken sysclk = {.bus = STM32_SRC_SYSCLK};
+	struct stm32_pclken hclk = {.bus = STM32_SRC_HCLK1};
+	uint32_t rate;
+
+	zassert_ok(clock_control_get_rate(clk, &sysclk, &rate));
+	zassert_equal(rate, HAL_RCC_GetSysClockFreq(), "SYSCLK rate mismatch");
+	zassert_ok(clock_control_get_rate(clk, &hclk, &rate));
+	zassert_equal(rate, HAL_RCC_GetHCLKFreq(), "HCLK rate mismatch");
+}
+
+#if defined(STM32_PLL1_ENABLED) && STM32_PLL1_FRACN_VALUE != 0
+/* Reinitialize while PLL1 is active, before system-timer initialization. */
+BUILD_ASSERT(CONFIG_CLOCK_CONTROL_INIT_PRIORITY < 2);
+
+extern int stm32_clock_control_init(const struct device *dev);
+
+static bool pll1_ready_before_reinit;
+static int pll_reinit_result;
+
+static int reinit_fractional_pll(void)
+{
+	pll1_ready_before_reinit = LL_RCC_PLL1_IsReady() == 1U;
+	pll_reinit_result = stm32_clock_control_init(DEVICE_DT_GET(DT_NODELABEL(rcc)));
+
+	return pll_reinit_result;
+}
+
+SYS_INIT(reinit_fractional_pll, PRE_KERNEL_1, 2);
+
+ZTEST(stm32n6_clock_core_config, test_pll_fractional)
+{
+	zassert_true(pll1_ready_before_reinit, "PLL1 was not active before reinitialization");
+	zassert_ok(pll_reinit_result);
+	zassert_equal(LL_RCC_PLL1_GetFRACN(), STM32_PLL1_FRACN_VALUE);
+	zassert_equal(LL_RCC_PLL1_IsEnabledFractionalModulationSpreadSpectrum(), 1U);
+	zassert_equal(LL_RCC_PLL1_IsEnabledDAC(), 1U);
+	zassert_equal(LL_RCC_PLL1_IsEnabledModulationSpreadSpectrum(), 0U);
+}
+#endif
 
 ZTEST(stm32n6_clock_core_config, test_cpuclk_src)
 {
