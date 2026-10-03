@@ -78,32 +78,59 @@ static int ens210_measure(const struct device *dev, enum sensor_channel chan)
 	uint8_t buf;
 	int ret;
 	const struct ens210_sens_start sense_start = {
-		.t_start = ENS210_T_START && (chan == SENSOR_CHAN_ALL
-				|| chan == SENSOR_CHAN_AMBIENT_TEMP),
-		.h_start = ENS210_H_START && (chan == SENSOR_CHAN_ALL
-				|| chan == SENSOR_CHAN_HUMIDITY)
+		.t_start = IS_ENABLED(CONFIG_ENS210_TEMPERATURE_SINGLE) &&
+			(chan == SENSOR_CHAN_ALL || chan == SENSOR_CHAN_AMBIENT_TEMP),
+		.h_start = IS_ENABLED(CONFIG_ENS210_HUMIDITY_SINGLE) &&
+			(chan == SENSOR_CHAN_ALL || chan == SENSOR_CHAN_HUMIDITY)
 	};
+	const uint8_t start_mask = *(uint8_t *)&sense_start;
 
-	/* Start measuring */
-	ret = i2c_reg_write_byte_dt(&config->i2c, ENS210_REG_SENS_START, *(uint8_t *)&sense_start);
-
-	if (ret < 0) {
-		LOG_ERR("Failed to set SENS_START to 0x%x",
-				*(uint8_t *)&sense_start);
-		return -EIO;
+	if (start_mask == 0) {
+		return 0;
 	}
 
-	/* Wait for measurement to be completed */
-	do {
-		k_sleep(K_MSEC(2));
-		ret = i2c_reg_read_byte_dt(&config->i2c, ENS210_REG_SENS_START, &buf);
+	/* Start only the requested single-shot channels. */
+	ret = i2c_reg_write_byte_dt(&config->i2c, ENS210_REG_SENS_START, start_mask);
+	if (ret < 0) {
+		LOG_ERR("Failed to set SENS_START to 0x%x", start_mask);
+		return ret;
+	}
 
+	/*
+	 * Datasheet rev. 6, Sensor Control/Timing and Fig. 9: requests take
+	 * effect at step boundaries. In mixed mode an idle requested channel
+	 * can still be waiting for the preceding continuous step (max 238 ms).
+	 * Guard that step before interpreting idle as completion. Use the same
+	 * conservative combined continuous bound for the following mixed step;
+	 * ordinary single-shot conversions take at most 130 ms, including boot.
+	 * Allow one 2 ms poll, up to two ticks of sleep rounding/alignment,
+	 * and 2 ms for a status transfer (under 1 ms at standard-mode I2C).
+	 * The deadline assumes bounded I2C transfers and thread scheduling.
+	 */
+	const bool mixed_mode = ENS210_T_RUN || ENS210_H_RUN;
+	const uint32_t start_guard_ms = mixed_mode ? 238 : 0;
+	const uint32_t conversion_ms = mixed_mode ? 238 : ENS210_CONVERSION_TIME_MS;
+	const uint32_t margin_ms = 2 + k_ticks_to_ms_ceil32(2) + 2;
+	const int64_t deadline = k_uptime_get() + start_guard_ms + conversion_ms + margin_ms;
+
+	if (start_guard_ms != 0) {
+		k_sleep(K_MSEC(start_guard_ms));
+	}
+
+	while (true) {
+		k_sleep(K_MSEC(2));
+		ret = i2c_reg_read_byte_dt(&config->i2c, ENS210_REG_SENS_STAT, &buf);
 		if (ret < 0) {
 			LOG_ERR("Failed to read SENS_STAT");
+			return ret;
 		}
-	} while (buf & *(uint8_t *)&sense_start);
-
-	return ret;
+		if ((buf & start_mask) == 0) {
+			return 0;
+		}
+		if (k_uptime_get() >= deadline) {
+			return -ETIMEDOUT;
+		}
+	}
 }
 #endif /* Single shot mode */
 
