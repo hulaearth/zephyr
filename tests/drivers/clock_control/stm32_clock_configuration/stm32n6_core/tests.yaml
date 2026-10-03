@@ -10,6 +10,9 @@ tests:
     extra_args: DTC_OVERLAY_FILE="boards/clear_clocks.overlay;boards/hsi_64.overlay"
   drivers.clock.stm32_clock_configuration.n6.cpu_pll_hsi_600_sysclk_pll_hsi_400:
     extra_args: DTC_OVERLAY_FILE="boards/clear_clocks.overlay;boards/pll_hsi_600_400.overlay"
+  drivers.clock.stm32_clock_configuration.n6.pll_hsi_fractional_202:
+    extra_args:
+      DTC_OVERLAY_FILE="boards/clear_clocks.overlay;boards/pll_hsi_fractional_202.overlay"
   # HSE test on boards that have a HSE: stm32n6570_dk
   drivers.clock.stm32_clock_configuration.n6.hse_48:
     platform_allow: stm32n6570_dk/stm32n657xx/sb

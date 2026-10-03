@@ -1,0 +1,67 @@
+/*
+ * SPDX-FileCopyrightText: Copyright The Zephyr Project Contributors
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/* Applied after clear_clocks.overlay. */
+
+&clk_hsi {
+	status = "okay";
+	clock-frequency = <DT_FREQ_M(64)>;
+	hsi-div = <1>;
+};
+
+&cpusw {
+	status = "okay";
+	clocks = <&rcc STM32_SRC_IC1 CPU_SEL(3)>;
+	clock-frequency = <DT_FREQ_M(202)>;
+};
+
+&ic1 {
+	status = "okay";
+	pll-src = <1>;
+	ic-div = <4>;
+};
+
+&ic2 {
+	status = "okay";
+	pll-src = <1>;
+	ic-div = <4>;
+};
+
+&ic6 {
+	status = "okay";
+	pll-src = <1>;
+	ic-div = <4>;
+};
+
+&ic11 {
+	status = "okay";
+	pll-src = <1>;
+	ic-div = <4>;
+};
+
+&perck {
+	status = "okay";
+	clocks = <&rcc STM32_SRC_HSI PER_SEL(0)>;
+};
+
+&pll1 {
+	status = "okay";
+	clocks = <&clk_hsi>;
+	div-m = <4>;
+	mul-n = <50>;
+	fracn = <8388608>;
+	div-p1 = <1>;
+	div-p2 = <1>;
+};
+
+&rcc {
+	clocks = <&ic2>;
+	clock-frequency = <DT_FREQ_M(202)>;
+	ahb-prescaler = <2>;
+	apb1-prescaler = <1>;
+	apb2-prescaler = <1>;
+	apb4-prescaler = <1>;
+	apb5-prescaler = <1>;
+};
