@@ -97,6 +97,11 @@ if(DEFINED ram_load_rom_region_path)
     message(FATAL_ERROR "MCUboot RAM-load memory region must be enabled")
   endif()
 
+  dt_prop(ram_load_rom_region_reg PATH ${ram_load_rom_region_path} PROPERTY reg)
+  if(NOT DEFINED ram_load_rom_region_reg)
+    message(FATAL_ERROR "MCUboot RAM-load memory region must define reg")
+  endif()
+
   dt_reg_addr(ram_load_rom_region_addr PATH ${ram_load_rom_region_path})
   dt_reg_size(ram_load_rom_region_size PATH ${ram_load_rom_region_path})
 
@@ -373,7 +378,11 @@ endforeach()
 # .last_section must be last in romable region
 # .last_section contains a fixed word to ensure location counter and actual
 # rom region data usage match when CONFIG_LINKER_LAST_SECTION_ID=y.
-zephyr_linker_section(NAME .last_section VMA FLASH LMA FLASH
+set(last_section_region FLASH)
+if(ram_load_uses_runtime_ram)
+  set(last_section_region RAM)
+endif()
+zephyr_linker_section(NAME .last_section VMA ${last_section_region} LMA ${last_section_region}
                       NOINPUT TYPE LINKER_SCRIPT_FOOTER)
 # KEEP can not be passed to zephyr_linker_section, so:
 zephyr_linker_section_configure(SECTION .last_section INPUT ".last_section" KEEP)
