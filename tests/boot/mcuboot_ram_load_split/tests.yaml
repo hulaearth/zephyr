@@ -1,0 +1,61 @@
+# Copyright (c) 2026 The Zephyr Project Contributors
+#
+# SPDX-License-Identifier: Apache-2.0
+
+common:
+  sysbuild: true
+  timeout: 120
+  tags:
+    - linker
+    - mcuboot
+    - pytest
+  platform_allow:
+    - mps2/an385
+  integration_platforms:
+    - mps2/an385
+  harness: pytest
+  harness_config:
+    pytest_root:
+      - "pytest/test_ram_load_split.py"
+tests:
+  bootloader.mcuboot.ram_load_split: {}
+  bootloader.mcuboot.ram_load_split.linker_generator:
+    extra_configs:
+      - CONFIG_CMAKE_LINKER_GENERATOR=y
+  bootloader.mcuboot.ram_load_split.layout.no_chosen: &no_chosen
+    sysbuild: false
+    build_only: true
+    extra_configs:
+      - CONFIG_MCUBOOT_BOOTLOADER_MODE_RAM_LOAD=y
+      - CONFIG_XIP=n
+      - CONFIG_MCUBOOT_GENERATE_UNSIGNED_IMAGE=y
+    extra_dtc_overlay_files:
+      - overlays/no_chosen.overlay
+  bootloader.mcuboot.ram_load_split.layout.no_chosen.linker_generator:
+    <<: *no_chosen
+    extra_conf_files:
+      - linker_generator.conf
+  bootloader.mcuboot.ram_load_split.layout.with_revert: &with_revert
+    sysbuild: false
+    build_only: true
+    extra_configs:
+      - CONFIG_MCUBOOT_BOOTLOADER_MODE_RAM_LOAD_WITH_REVERT=y
+      - CONFIG_XIP=n
+      - CONFIG_MCUBOOT_GENERATE_UNSIGNED_IMAGE=y
+  bootloader.mcuboot.ram_load_split.layout.with_revert.linker_generator:
+    <<: *with_revert
+    extra_conf_files:
+      - linker_generator.conf
+  bootloader.mcuboot.ram_load_split.layout.single_app: &single_app
+    sysbuild: false
+    build_only: true
+    extra_configs:
+      - CONFIG_MCUBOOT_BOOTLOADER_MODE_SINGLE_APP_RAM_LOAD=y
+      - CONFIG_XIP=n
+      - CONFIG_MCUBOOT_GENERATE_UNSIGNED_IMAGE=y
+    extra_dtc_overlay_files:
+      - overlays/single_app.overlay
+  bootloader.mcuboot.ram_load_split.layout.single_app.linker_generator:
+    <<: *single_app
+    extra_conf_files:
+      - linker_generator.conf

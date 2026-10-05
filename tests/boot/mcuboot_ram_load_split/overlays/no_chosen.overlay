@@ -1,0 +1,14 @@
+/*
+ * Copyright (c) 2026 The Zephyr Project Contributors
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#include "../boards/mps2_an385.overlay"
+
+/ {
+	chosen {
+		/delete-property/ mcuboot,image-ram;
+		/delete-property/ mcuboot,ram-load-dev;
+	};
+};
