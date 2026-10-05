@@ -145,6 +145,8 @@ static uint32_t get_sysclk_frequency(void)
 	return STM32_HSE_FREQ;
 #elif defined(STM32_SYSCLK_SRC_HSI)
 	return STM32_HSI_FREQ;
+#elif defined(STM32_SYSCLK_SRC_MSI)
+	return get_msi_frequency();
 #elif defined(STM32_SYSCLK_SRC_IC2)
 	return get_icout_frequency(LL_RCC_IC2_GetSource(), STM32_IC2_DIV);
 #else
