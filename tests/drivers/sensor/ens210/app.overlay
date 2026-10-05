@@ -1,0 +1,26 @@
+/*
+ * SPDX-FileCopyrightText: Copyright The Zephyr Project Contributors
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+&i2c0 {
+	status = "okay";
+
+	ens210: sensor@43 {
+		compatible = "ams,ens210";
+		reg = <0x43>;
+		zephyr,deferred-init;
+	};
+
+	reset_error: sensor@44 {
+		compatible = "ams,ens210";
+		reg = <0x44>;
+		zephyr,deferred-init;
+	};
+
+	enable_error: sensor@45 {
+		compatible = "ams,ens210";
+		reg = <0x45>;
+		zephyr,deferred-init;
+	};
+};
