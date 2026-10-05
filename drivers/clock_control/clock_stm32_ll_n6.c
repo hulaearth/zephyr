@@ -33,6 +33,7 @@
 #define PLL3_ID		3
 #define PLL4_ID		4
 
+#define PLL_FRACN_SCALE BIT64(24)
 
 static uint32_t get_bus_clock(uint32_t clock, uint32_t prescaler)
 {
@@ -75,16 +76,20 @@ static uint32_t get_pllsrc_frequency(int pll_id)
 static uint32_t get_pllout_frequency(int pll_id)
 {
 	uint32_t pllsrc_freq = get_pllsrc_frequency(pll_id);
-	int pllm_div;
-	int plln_mul;
-	int pllout_div1;
-	int pllout_div2;
+	uint32_t pllm_div;
+	uint32_t plln_mul;
+	uint32_t fracn;
+	uint32_t pllout_div1;
+	uint32_t pllout_div2;
+	uint64_t numerator;
+	uint64_t denominator;
 
 	switch (pll_id) {
 #if defined(STM32_PLL1_ENABLED)
 	case PLL1_ID:
 		pllm_div = STM32_PLL1_M_DIVISOR;
 		plln_mul = STM32_PLL1_N_MULTIPLIER;
+		fracn = STM32_PLL1_FRACN_VALUE;
 		pllout_div1 = STM32_PLL1_P1_DIVISOR;
 		pllout_div2 = STM32_PLL1_P2_DIVISOR;
 		break;
@@ -93,6 +98,7 @@ static uint32_t get_pllout_frequency(int pll_id)
 	case PLL2_ID:
 		pllm_div = STM32_PLL2_M_DIVISOR;
 		plln_mul = STM32_PLL2_N_MULTIPLIER;
+		fracn = STM32_PLL2_FRACN_VALUE;
 		pllout_div1 = STM32_PLL2_P1_DIVISOR;
 		pllout_div2 = STM32_PLL2_P2_DIVISOR;
 		break;
@@ -101,6 +107,7 @@ static uint32_t get_pllout_frequency(int pll_id)
 	case PLL3_ID:
 		pllm_div = STM32_PLL3_M_DIVISOR;
 		plln_mul = STM32_PLL3_N_MULTIPLIER;
+		fracn = STM32_PLL3_FRACN_VALUE;
 		pllout_div1 = STM32_PLL3_P1_DIVISOR;
 		pllout_div2 = STM32_PLL3_P2_DIVISOR;
 		break;
@@ -109,6 +116,7 @@ static uint32_t get_pllout_frequency(int pll_id)
 	case PLL4_ID:
 		pllm_div = STM32_PLL4_M_DIVISOR;
 		plln_mul = STM32_PLL4_N_MULTIPLIER;
+		fracn = STM32_PLL4_FRACN_VALUE;
 		pllout_div1 = STM32_PLL4_P1_DIVISOR;
 		pllout_div2 = STM32_PLL4_P2_DIVISOR;
 		break;
@@ -118,9 +126,13 @@ static uint32_t get_pllout_frequency(int pll_id)
 		return 0;
 	}
 
-	__ASSERT_NO_MSG(pllm_div && pllout_div1 && pllout_div2);
+	__ASSERT_NO_MSG((pllm_div != 0U) && (pllout_div1 != 0U) && (pllout_div2 != 0U));
 
-	return (pllsrc_freq / pllm_div) * plln_mul / (pllout_div1 * pllout_div2);
+	/* Preserve the 24-bit fraction and round only the final output to Hz. */
+	numerator = (uint64_t)pllsrc_freq * (plln_mul * PLL_FRACN_SCALE + fracn);
+	denominator = (uint64_t)pllm_div * pllout_div1 * pllout_div2 * PLL_FRACN_SCALE;
+
+	return (uint32_t)DIV_ROUND_CLOSEST(numerator, denominator);
 }
 
 __unused uint32_t get_icout_frequency(uint32_t icsrc, int div)
@@ -684,6 +696,9 @@ static int set_up_plls(void)
 	stm32_clock_switch_to_hsi();
 
 	LL_RCC_PLL1_Disable();
+	/* Wait for shutdown before programming fractional dividers. */
+	while ((STM32_PLL1_FRACN_VALUE != 0U) && (LL_RCC_PLL1_IsReady() != 0U)) {
+	}
 
 	/* Configure PLL source : Can be HSE, HSI, MSI */
 	if (IS_ENABLED(STM32_PLL_SRC_HSE)) {
@@ -713,9 +728,15 @@ static int set_up_plls(void)
 	LL_RCC_PLL1_SetP1(STM32_PLL1_P1_DIVISOR);
 	LL_RCC_PLL1_SetP2(STM32_PLL1_P2_DIVISOR);
 
-	/* Disable fractional mode */
-	LL_RCC_PLL1_SetFRACN(0);
+	/* Clear MODDSEN before setting it to latch the fractional divider. */
+	LL_RCC_PLL1_SetFRACN(STM32_PLL1_FRACN_VALUE);
 	LL_RCC_PLL1_DisableFractionalModulationSpreadSpectrum();
+	if (STM32_PLL1_FRACN_VALUE != 0U) {
+		LL_RCC_PLL1_EnableDAC();
+		LL_RCC_PLL1_EnableFractionalModulationSpreadSpectrum();
+	} else {
+		LL_RCC_PLL1_DisableDAC();
+	}
 
 	LL_RCC_PLL1_AssertModulationSpreadSpectrumReset();
 
@@ -731,6 +752,9 @@ static int set_up_plls(void)
 
 #if defined(STM32_PLL2_ENABLED)
 	LL_RCC_PLL2_Disable();
+	/* Wait for shutdown before programming fractional dividers. */
+	while ((STM32_PLL2_FRACN_VALUE != 0U) && (LL_RCC_PLL2_IsReady() != 0U)) {
+	}
 
 	/* Configure PLL source : Can be HSE, HSI, MSI */
 	if (IS_ENABLED(STM32_PLL2_SRC_HSE)) {
@@ -760,9 +784,15 @@ static int set_up_plls(void)
 	LL_RCC_PLL2_SetP1(STM32_PLL2_P1_DIVISOR);
 	LL_RCC_PLL2_SetP2(STM32_PLL2_P2_DIVISOR);
 
-	/* Disable fractional mode */
-	LL_RCC_PLL2_SetFRACN(0);
+	/* Clear MODDSEN before setting it to latch the fractional divider. */
+	LL_RCC_PLL2_SetFRACN(STM32_PLL2_FRACN_VALUE);
 	LL_RCC_PLL2_DisableFractionalModulationSpreadSpectrum();
+	if (STM32_PLL2_FRACN_VALUE != 0U) {
+		LL_RCC_PLL2_EnableDAC();
+		LL_RCC_PLL2_EnableFractionalModulationSpreadSpectrum();
+	} else {
+		LL_RCC_PLL2_DisableDAC();
+	}
 
 	LL_RCC_PLL2_AssertModulationSpreadSpectrumReset();
 
@@ -778,6 +808,9 @@ static int set_up_plls(void)
 
 #if defined(STM32_PLL3_ENABLED)
 	LL_RCC_PLL3_Disable();
+	/* Wait for shutdown before programming fractional dividers. */
+	while ((STM32_PLL3_FRACN_VALUE != 0U) && (LL_RCC_PLL3_IsReady() != 0U)) {
+	}
 
 	/* Configure PLL source : Can be HSE, HSI, MSI */
 	if (IS_ENABLED(STM32_PLL3_SRC_HSE)) {
@@ -807,9 +840,15 @@ static int set_up_plls(void)
 	LL_RCC_PLL3_SetP1(STM32_PLL3_P1_DIVISOR);
 	LL_RCC_PLL3_SetP2(STM32_PLL3_P2_DIVISOR);
 
-	/* Disable fractional mode */
-	LL_RCC_PLL3_SetFRACN(0);
+	/* Clear MODDSEN before setting it to latch the fractional divider. */
+	LL_RCC_PLL3_SetFRACN(STM32_PLL3_FRACN_VALUE);
 	LL_RCC_PLL3_DisableFractionalModulationSpreadSpectrum();
+	if (STM32_PLL3_FRACN_VALUE != 0U) {
+		LL_RCC_PLL3_EnableDAC();
+		LL_RCC_PLL3_EnableFractionalModulationSpreadSpectrum();
+	} else {
+		LL_RCC_PLL3_DisableDAC();
+	}
 
 	LL_RCC_PLL3_AssertModulationSpreadSpectrumReset();
 
@@ -825,6 +864,9 @@ static int set_up_plls(void)
 
 #if defined(STM32_PLL4_ENABLED)
 	LL_RCC_PLL4_Disable();
+	/* Wait for shutdown before programming fractional dividers. */
+	while ((STM32_PLL4_FRACN_VALUE != 0U) && (LL_RCC_PLL4_IsReady() != 0U)) {
+	}
 
 	/* Configure PLL source : Can be HSE, HSI, MSI */
 	if (IS_ENABLED(STM32_PLL4_SRC_HSE)) {
@@ -854,9 +896,15 @@ static int set_up_plls(void)
 	LL_RCC_PLL4_SetP1(STM32_PLL4_P1_DIVISOR);
 	LL_RCC_PLL4_SetP2(STM32_PLL4_P2_DIVISOR);
 
-	/* Disable fractional mode */
-	LL_RCC_PLL4_SetFRACN(0);
+	/* Clear MODDSEN before setting it to latch the fractional divider. */
+	LL_RCC_PLL4_SetFRACN(STM32_PLL4_FRACN_VALUE);
 	LL_RCC_PLL4_DisableFractionalModulationSpreadSpectrum();
+	if (STM32_PLL4_FRACN_VALUE != 0U) {
+		LL_RCC_PLL4_EnableDAC();
+		LL_RCC_PLL4_EnableFractionalModulationSpreadSpectrum();
+	} else {
+		LL_RCC_PLL4_DisableDAC();
+	}
 
 	LL_RCC_PLL4_AssertModulationSpreadSpectrumReset();
 
