@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import os
+import pickle
 import re
 import selectors
 import subprocess
@@ -11,10 +12,69 @@ import time
 from pathlib import Path
 
 import yaml
+from elftools.elf.elffile import ELFFile
 from twister_harness import DeviceAdapter
 
 sys.path.insert(0, os.path.join(os.environ["ZEPHYR_BASE"], "scripts", "pylib", "twister"))
+sys.path.insert(
+    0, os.path.join(os.environ["ZEPHYR_BASE"], "scripts", "dts", "python-devicetree", "src")
+)
 from twisterlib.cmakecache import CMakeCache  # noqa: E402
+
+
+def test_ram_load_layout(unlaunched_dut: DeviceAdapter) -> None:
+    build_dir = Path(unlaunched_dut.device_config.build_dir)
+    if (build_dir / "domains.yaml").exists():
+        domains = yaml.safe_load((build_dir / "domains.yaml").read_text())
+        build_dir = next(
+            Path(domain["build_dir"])
+            for domain in domains["domains"]
+            if domain["name"] != "mcuboot"
+        )
+
+    configuration = (build_dir / "zephyr" / ".config").read_text()
+    assert "# CONFIG_XIP is not set" in configuration
+    chosen = "mcuboot,image-ram"
+    if "CONFIG_MCUBOOT_BOOTLOADER_MODE_SINGLE_APP_RAM_LOAD=y" in configuration:
+        chosen = "mcuboot,ram-load-dev"
+    with (build_dir / "zephyr" / "edt.pickle").open("rb") as file:
+        devicetree = pickle.load(file)
+    assert ("CONFIG_ARCH_DATA_COPY_FOR_RAM_LOAD_SPLIT=y" in configuration) == (
+        chosen in devicetree.chosen_nodes
+    )
+    runtime = devicetree.chosen_nodes["zephyr,sram"].regs[0]
+    load = devicetree.chosen_nodes.get(chosen, devicetree.chosen_nodes["zephyr,sram"]).regs[0]
+
+    with (build_dir / "zephyr" / "zephyr.elf").open("rb") as file:
+        symbols = {
+            symbol.name: symbol["st_value"]
+            for symbol in ELFFile(file).get_section_by_name(".symtab").iter_symbols()
+        }
+    assert symbols["__rom_region_start"] == load.addr
+    assert symbols["__data_region_start"] >= runtime.addr
+    assert symbols["__bss_start"] >= runtime.addr
+    assert load.addr <= symbols["__data_region_load_start"] < load.addr + load.size
+
+    memory_map = (build_dir / "zephyr" / "zephyr.map").read_text()
+    ram = re.search(r"^RAM\s+(0x[0-9a-fA-F]+)\s+(0x[0-9a-fA-F]+)", memory_map, re.MULTILINE)
+    assert ram is not None
+    runtime_size = min(load.size, runtime.size) if load.addr == runtime.addr else runtime.size
+    assert (int(ram[1], 16), int(ram[2], 16)) == (runtime.addr, runtime_size)
+    if load.addr == runtime.addr:
+        assert symbols["__data_region_start"] == symbols["__data_region_load_start"]
+    else:
+        assert symbols["__data_region_start"] != symbols["__data_region_load_start"]
+        load_size = load.size
+        if load.addr < runtime.addr < load.addr + load.size:
+            load_size = runtime.addr - load.addr
+        rom_end_offset = re.search(r"^CONFIG_ROM_END_OFFSET=(.+)$", configuration, re.MULTILINE)
+        assert rom_end_offset is not None
+        flash = re.search(r"^FLASH\s+(0x[0-9a-fA-F]+)\s+(0x[0-9a-fA-F]+)", memory_map, re.MULTILINE)
+        assert flash is not None
+        assert (int(flash[1], 16), int(flash[2], 16)) == (
+            load.addr,
+            load_size - int(rom_end_offset[1], 0),
+        )
 
 
 def test_ram_load_split(unlaunched_dut: DeviceAdapter) -> None:
