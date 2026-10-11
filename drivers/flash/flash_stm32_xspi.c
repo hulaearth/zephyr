@@ -144,6 +144,11 @@ static int xspi_read_access(const struct device *dev, XSPI_RegularCmdTypeDef *cm
 {
 	struct flash_stm32_xspi_data *dev_data = dev->data;
 	HAL_StatusTypeDef hal_ret;
+	uint32_t fifo_threshold;
+	bool restore_fifo_threshold = false;
+	bool controller_quiescent;
+	bool cleanup_failed = false;
+	int ret;
 
 	LOG_DBG("Instruction 0x%x", cmd->Instruction);
 
@@ -157,6 +162,16 @@ static int xspi_read_access(const struct device *dev, XSPI_RegularCmdTypeDef *cm
 		return -EIO;
 	}
 
+	fifo_threshold = HAL_XSPI_GetFifoThreshold(&dev_data->hxspi);
+	if (size < fifo_threshold) {
+		hal_ret = HAL_XSPI_SetFifoThreshold(&dev_data->hxspi, size);
+		if (hal_ret != HAL_OK) {
+			LOG_ERR("%d: Failed to lower XSPI FIFO threshold", hal_ret);
+			return -EIO;
+		}
+		restore_fifo_threshold = true;
+	}
+
 #ifdef CONFIG_FLASH_STM32_XSPI_DMA
 	hal_ret = HAL_XSPI_Receive_DMA(&dev_data->hxspi, data);
 #else
@@ -165,12 +180,43 @@ static int xspi_read_access(const struct device *dev, XSPI_RegularCmdTypeDef *cm
 
 	if (hal_ret != HAL_OK) {
 		LOG_ERR("%d: Failed to read data", hal_ret);
-		return -EIO;
+		ret = -EIO;
+		goto cleanup;
 	}
 
 	k_sem_take(&dev_data->sync, K_FOREVER);
 
-	return dev_data->cmd_status;
+	ret = dev_data->cmd_status;
+
+cleanup:
+	/* A completed short read can leave BUSY set or data in the FIFO. */
+	if ((dev_data->hxspi.Instance->SR & (XSPI_SR_BUSY | XSPI_SR_FLEVEL)) != 0U) {
+		hal_ret = HAL_XSPI_Abort(&dev_data->hxspi);
+		if (hal_ret != HAL_OK) {
+			LOG_ERR("%d: Failed to quiesce incomplete XSPI read", hal_ret);
+			cleanup_failed = true;
+		}
+	}
+	controller_quiescent =
+		(dev_data->hxspi.Instance->SR & (XSPI_SR_BUSY | XSPI_SR_FLEVEL)) == 0U;
+	if (!controller_quiescent) {
+		LOG_ERR("XSPI read remained active after quiesce");
+		cleanup_failed = true;
+	}
+
+	/* Do not change the threshold while the controller is still active. */
+	if (restore_fifo_threshold && controller_quiescent) {
+		hal_ret = HAL_XSPI_SetFifoThreshold(&dev_data->hxspi, fifo_threshold);
+		if (hal_ret != HAL_OK) {
+			LOG_ERR("%d: Failed to restore XSPI FIFO threshold", hal_ret);
+			cleanup_failed = true;
+		}
+	}
+
+	if (ret == 0 && cleanup_failed) {
+		ret = -EIO;
+	}
+	return ret;
 }
 
 static int xspi_write_access(struct flash_stm32_xspi_data *dev_data,
