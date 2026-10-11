@@ -1147,7 +1147,9 @@ static void stm32_xspi_invalidate_mmap_cache(const struct device *dev, off_t add
 	size_t line_size = sys_cache_data_line_size_get();
 
 	if (line_size != 0 && IS_ENABLED(CONFIG_DCACHE) &&
-	    IS_ENABLED(CONFIG_FLASH_STM32_NOR_MEMMAP) &&
+	    (IS_ENABLED(CONFIG_FLASH_STM32_NOR_MEMMAP) ||
+	     (IS_ENABLED(CONFIG_STM32_APP_IN_EXT_FLASH) && IS_ENABLED(CONFIG_XIP)) ||
+	     IS_ENABLED(CONFIG_FLASH_STM32_XSPI_RAM_RELOCATION)) &&
 	    IS_ENABLED(CONFIG_CACHE_MANAGEMENT)) {
 		uintptr_t start = ROUND_DOWN(dev_cfg->mem_map_based_address + addr, line_size);
 		uintptr_t end = ROUND_UP(dev_cfg->mem_map_based_address + addr + size, line_size);
