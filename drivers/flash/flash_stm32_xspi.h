@@ -74,6 +74,8 @@ struct flash_stm32_xspi_config {
 	const struct pinctrl_dev_config *pcfg;
 	bool four_byte_opcodes;
 	bool requires_ulbpr;
+	bool check_jedec_id;
+	uint8_t expected_jedec_id[JESD216_READ_ID_LEN];
 	uint32_t mem_map_based_address;
 #if STM32_XSPI_RESET_GPIO
 	const struct gpio_dt_spec reset;
@@ -101,10 +103,8 @@ struct flash_stm32_xspi_data {
 	uint32_t write_opcode;
 	enum jesd216_mode_type read_mode;
 	enum jesd216_dw15_qer_type qer_type;
-#if defined(CONFIG_FLASH_JESD216_API)
-	/* Table to hold the jedec Read ID given by the octoFlash const */
+	/* Identity read from the flash during cold initialization. */
 	uint8_t jedec_id[JESD216_READ_ID_LEN];
-#endif /* CONFIG_FLASH_JESD216_API */
 	int cmd_status;
 #ifdef CONFIG_FLASH_STM32_XSPI_DMA
 	struct stream dma_tx;

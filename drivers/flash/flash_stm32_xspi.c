@@ -342,52 +342,51 @@ static uint32_t stm32_xspi_hal_address_size(const struct flash_stm32_xspi_data *
 	return HAL_XSPI_ADDRESS_24_BITS;
 }
 
-#if defined(CONFIG_FLASH_JESD216_API)
-/*
- * Read the JEDEC ID data from the external Flash at init
- * and store in the jedec_id Table of the flash_stm32_xspi_data
- * The JEDEC ID is not given by a DTS property
- */
-static int stm32_xspi_read_jedec_id(const struct device *dev)
+/* Read identity in reset-default SPI mode before vendor-specific configuration. */
+static int stm32_xspi_read_jedec_id(const struct device *dev, uint32_t source_frequency)
 {
+	const struct flash_stm32_xspi_config *dev_cfg = dev->config;
 	struct flash_stm32_xspi_data *dev_data = dev->data;
-
-	/* This is a SPI/STR command to issue to the external Flash device */
 	XSPI_RegularCmdTypeDef cmd;
+	uint32_t prescaler = dev_data->hxspi.Init.ClockPrescaler;
+	uint32_t id_prescaler = MAX(prescaler, DIV_ROUND_UP(source_frequency, MHZ(25)) - 1U);
+	HAL_StatusTypeDef restore_ret;
+	int ret;
 
-	xspi_prepare_cmd(&cmd, XSPI_SPI_MODE, XSPI_STR_TRANSFER);
-
-	cmd.Instruction = JESD216_CMD_READ_ID;
-	cmd.AddressWidth = stm32_xspi_hal_address_size(dev_data);
-	cmd.AddressMode = HAL_XSPI_ADDRESS_NONE;
-	cmd.DataLength = JESD216_READ_ID_LEN; /* 3 bytes in the READ ID */
-
-	HAL_StatusTypeDef hal_ret;
-
-	hal_ret = HAL_XSPI_Command(&dev_data->hxspi, &cmd,
-				   HAL_XSPI_TIMEOUT_DEFAULT_VALUE);
-
-	if (hal_ret != HAL_OK) {
-		LOG_ERR("%d: Failed to send XSPI instruction", hal_ret);
+	/* RDID is a legacy-SPI command, not a high-speed octal transfer. */
+	if (id_prescaler > STM32_XSPI_CLOCK_PRESCALER_MAX ||
+	    HAL_XSPI_SetClockPrescaler(&dev_data->hxspi, id_prescaler) != HAL_OK) {
 		return -EIO;
 	}
 
-	/* Place the received data directly into the jedec Table */
-	hal_ret = HAL_XSPI_Receive(&dev_data->hxspi, dev_data->jedec_id,
-				   HAL_XSPI_TIMEOUT_DEFAULT_VALUE);
-	if (hal_ret != HAL_OK) {
-		LOG_ERR("%d: Failed to read data", hal_ret);
-		return -EIO;
+	xspi_prepare_cmd(&cmd, XSPI_SPI_MODE, XSPI_STR_TRANSFER);
+	cmd.Instruction = JESD216_CMD_READ_ID;
+	cmd.AddressMode = HAL_XSPI_ADDRESS_NONE;
+	ret = xspi_read_access(dev, &cmd, dev_data->jedec_id, JESD216_READ_ID_LEN);
+	restore_ret = HAL_XSPI_SetClockPrescaler(&dev_data->hxspi, prescaler);
+	if (ret == 0 && restore_ret != HAL_OK) {
+		ret = -EIO;
+	}
+	if (ret != 0) {
+		return ret;
 	}
 
 	LOG_DBG("Jedec ID = [%02x %02x %02x]",
 		dev_data->jedec_id[0], dev_data->jedec_id[1], dev_data->jedec_id[2]);
 
-	dev_data->cmd_status = 0;
+	if (dev_cfg->check_jedec_id &&
+	    memcmp(dev_data->jedec_id, dev_cfg->expected_jedec_id, JESD216_READ_ID_LEN) != 0) {
+		LOG_ERR("Flash identity mismatch: got %02x %02x %02x, expected %02x %02x %02x",
+			dev_data->jedec_id[0], dev_data->jedec_id[1], dev_data->jedec_id[2],
+			dev_cfg->expected_jedec_id[0], dev_cfg->expected_jedec_id[1],
+			dev_cfg->expected_jedec_id[2]);
+		return -ENODEV;
+	}
 
 	return 0;
 }
 
+#if defined(CONFIG_FLASH_JESD216_API)
 /*
  * Read Serial Flash ID :
  * just gives the values received by the external Flash
@@ -1173,6 +1172,10 @@ static int flash_stm32_xspi_erase(const struct device *dev, off_t addr,
 	const uint8_t data_rate = dev_cfg->data_rate;
 	int ret = 0;
 
+	if (!device_is_ready(dev)) {
+		return -ENODEV;
+	}
+
 	/* Ignore zero size erase */
 	if (size == 0) {
 		return 0;
@@ -1513,6 +1516,10 @@ static int flash_stm32_xspi_write(const struct device *dev, off_t addr,
 	const uint8_t data_rate = dev_cfg->data_rate;
 	size_t to_write;
 	int ret = 0;
+
+	if (!device_is_ready(dev)) {
+		return -ENODEV;
+	}
 
 	if (!xspi_address_is_valid(dev, addr, size)) {
 		LOG_ERR("Error: address or size exceeds expected values: "
@@ -2342,6 +2349,7 @@ static int flash_stm32_xspi_init(const struct device *dev)
 				     == CLOCK_CONTROL_STATUS_ON) {
 		if (stm32_xspi_is_memorymap(dev_data)) {
 			LOG_DBG("NOR init'd in MemMapped mode");
+			/* The inherited XIP protocol cannot be interrupted for SPI RDID. */
 
 			/* Full init is bypassed when already in XIP ext-flash mode,
 			 * so set required runtime defaults here.
@@ -2531,14 +2539,14 @@ static int flash_stm32_xspi_init(const struct device *dev)
 
 	LOG_DBG("Mem Ready (SPI/STR)");
 
-#if defined(CONFIG_FLASH_JESD216_API)
-	/* Process with the RDID (jedec read ID) instruction at init and fill jedec_id Table */
-	ret = stm32_xspi_read_jedec_id(dev);
-	if (ret != 0) {
-		LOG_ERR("Read ID failed: %d", ret);
-		return ret;
+	/* Cold initialization checks identity before configuring the flash protocol. */
+	if (dev_cfg->check_jedec_id || IS_ENABLED(CONFIG_FLASH_JESD216_API)) {
+		ret = stm32_xspi_read_jedec_id(dev, ahb_clock_freq);
+		if (ret != 0) {
+			LOG_ERR("Read ID failed: %d", ret);
+			return ret;
+		}
 	}
-#endif /* CONFIG_FLASH_JESD216_API */
 
 	if (stm32_xspi_config_mem(dev) != 0) {
 		LOG_ERR("OSPI mode not config'd (%u rate %u)",
@@ -2777,6 +2785,10 @@ static int flash_stm32_xspi_init(const struct device *dev)
 		.data_rate = DT_INST_PROP(inst, data_rate),			/* DTR or STR */\
 		.four_byte_opcodes = DT_INST_PROP_OR(inst, four_byte_opcodes, 0),		\
 		.requires_ulbpr = DT_INST_PROP_OR(inst, requires_ulbpr, 0),			\
+		.check_jedec_id = DT_INST_NODE_HAS_PROP(inst, jedec_id),			\
+		IF_ENABLED(DT_INST_NODE_HAS_PROP(inst, jedec_id), (				\
+			.expected_jedec_id = DT_INST_PROP(inst, jedec_id),			\
+		))									\
 		IF_ENABLED(DT_INST_NODE_HAS_PROP(inst, reset_gpios), (				\
 			.reset = GPIO_DT_SPEC_INST_GET(0, reset_gpios),				\
 			.reset_gpios_duration = DT_INST_PROP_OR(inst, reset_gpios_duration, 1),	\
@@ -2806,10 +2818,6 @@ static int flash_stm32_xspi_init(const struct device *dev)
 		.qer_type = DT_QER_PROP_OR(inst, JESD216_DW15_QER_VAL_S1B6),			\
 		.write_opcode = DT_WRITEOC_PROP_OR(inst, SPI_NOR_WRITEOC_NONE),			\
 		.page_size = SPI_NOR_PAGE_SIZE, /* by default, to be updated by sfdp */		\
-		IF_ENABLED(DT_INST_NODE_HAS_PROP(inst, jedec_id), (			\
-			IF_ENABLED(CONFIG_FLASH_JESD216_API,				\
-				(.jedec_id = DT_INST_PROP(inst, jedec_id),))			\
-		))									\
 												\
 		XSPI_DMA_CHANNEL(STM32_XSPI_NODE(inst), tx, TX, MEMORY, PERIPHERAL)		\
 		XSPI_DMA_CHANNEL(STM32_XSPI_NODE(inst), rx, RX, PERIPHERAL, MEMORY)		\
