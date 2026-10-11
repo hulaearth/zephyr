@@ -28,6 +28,13 @@ void function_in_custom_section(void);
 
 #define HAS_SRAM2_DATA_SECTION (CONFIG_ARM)
 
+/* This file is relocated by zephyr_code_relocate(), including this helper. */
+static __noinline uint32_t relocated_data_value(void)
+{
+	/* Force a runtime load rather than constant-folding the initial value. */
+	return *(volatile uint32_t *)&var_sram2_data;
+}
+
 ZTEST(code_relocation, test_function_in_sram2)
 {
 	extern uintptr_t __ram_text_reloc_start;
@@ -53,6 +60,12 @@ ZTEST(code_relocation, test_function_in_sram2)
 		(uintptr_t)&__sram2_data_reloc_start,
 		(uintptr_t)&__sram2_data_reloc_end,
 		"var_sram2_data not in sram2 region");
+	zassert_between_inclusive((uintptr_t)&relocated_data_value,
+		(uintptr_t)&__sram2_text_reloc_start,
+		(uintptr_t)&__sram2_text_reloc_end,
+		"relocated_data_value not in generated sram2 text region");
+	zassert_equal(relocated_data_value(), 10U, "relocated data was not copied");
+	zassert_equal(var_sram2_bss, 0U, "var_sram2_bss was not zeroed");
 	zassert_between_inclusive((uintptr_t)&k_sem_give,
 		(uintptr_t)&__sram2_text_reloc_start,
 		(uintptr_t)&__sram2_text_reloc_end,
