@@ -243,10 +243,19 @@ static int ens210_wait_boot(const struct device *dev)
 		}
 
 		if (cnt == 0) {
-			ens210_sys_reset(dev);
+			ret = ens210_sys_reset(dev);
+			if (ret < 0) {
+				return ret;
+			}
+
+			/* Software reset needs up to 1.2 ms to complete. */
+			k_sleep(K_MSEC(2));
 		}
 
-		ens210_sys_enable(dev, 0);
+		ret = ens210_sys_enable(dev, 0);
+		if (ret < 0) {
+			return ret;
+		}
 
 		k_sleep(K_MSEC(2));
 	}
@@ -296,7 +305,7 @@ static int ens210_init(const struct device *dev)
 	/* Wait until the device is ready. */
 	ret = ens210_wait_boot(dev);
 	if (ret < 0) {
-		return -EIO;
+		return ret;
 	}
 
 	/* Check Hardware ID. This is only possible after device is ready
