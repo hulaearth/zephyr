@@ -173,7 +173,13 @@ static int xspi_read_access(const struct device *dev, XSPI_RegularCmdTypeDef *cm
 	}
 
 #ifdef CONFIG_FLASH_STM32_XSPI_DMA
-	hal_ret = HAL_XSPI_Receive_DMA(&dev_data->hxspi, data);
+	/* The DMA channels use word transfers; receive byte tails through the IRQ. */
+	if ((size % 4U) != 0U || (MIN(size, fifo_threshold) % 4U) != 0U ||
+	    !IS_ALIGNED(data, 4U)) {
+		hal_ret = HAL_XSPI_Receive_IT(&dev_data->hxspi, data);
+	} else {
+		hal_ret = HAL_XSPI_Receive_DMA(&dev_data->hxspi, data);
+	}
 #else
 	hal_ret = HAL_XSPI_Receive_IT(&dev_data->hxspi, data);
 #endif
