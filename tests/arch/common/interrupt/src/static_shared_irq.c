@@ -20,17 +20,12 @@
  */
 ZTEST(interrupt_feature, test_static_shared_irq_write)
 {
-	/* note: this test is very brittle since it requires that
-	 * the chosen interrupt lines be unused for all of the
-	 * testing platforms. Failing to meet this requirement
-	 * leads to build failures due to the number of clients
-	 * exceeding the limit. Still, it's important to test that
-	 * the static shared interrupts work properly. As such,
-	 * this test shall be restricted to a single platform, thus
-	 * decreasing the risk of build errors appearing due to the
-	 * chosen interrupts being used.
+	/* This test uses IRQs 10 and 11. They are available as GIC
+	 * software interrupts on qemu_cortex_a53 and as unused NVIC
+	 * lines on qemu_cortex_m3. Keep this test restricted to these
+	 * platforms because another platform may use these lines.
 	 */
-#ifndef CONFIG_BOARD_QEMU_CORTEX_A53
+#if !defined(CONFIG_BOARD_QEMU_CORTEX_A53) && !defined(CONFIG_BOARD_QEMU_CORTEX_M3)
 	ztest_test_skip();
 #else
 	int i;
