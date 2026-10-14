@@ -57,4 +57,25 @@ ZTEST(i2s_stm32_sai_continuous_rx, test_completion_prefix_is_ordered_and_wraps)
 	zassert_equal(0U, publish_count);
 }
 
+ZTEST(i2s_stm32_sai_continuous_rx, test_stop_prefix_includes_terminal_tail)
+{
+	uint8_t states[NODE_COUNT] = {NODE_DMA, NODE_DMA, NODE_DMA, NODE_DMA,
+				      NODE_DMA, NODE_DMA, NODE_DMA, NODE_DMA};
+	uint8_t publish_count = 0U;
+
+	zassert_equal(SAI_RX_PREFIX_READY,
+		      sai_rx_plan_prefix_through(6U, 1U, NODE_COUNT, states, NODE_DMA,
+						 &publish_count));
+	zassert_equal(4U, publish_count);
+	zassert_true(sai_rx_prefix_contains(6U, publish_count, NODE_COUNT, 7U));
+	zassert_true(sai_rx_prefix_contains(6U, publish_count, NODE_COUNT, 0U));
+	zassert_true(sai_rx_prefix_contains(6U, publish_count, NODE_COUNT, 1U));
+	zassert_false(sai_rx_prefix_contains(6U, publish_count, NODE_COUNT, 2U));
+
+	states[0] = NODE_BORROWED;
+	zassert_equal(SAI_RX_PREFIX_FAULT,
+		      sai_rx_plan_prefix_through(6U, 1U, NODE_COUNT, states, NODE_DMA,
+						 &publish_count));
+}
+
 ZTEST_SUITE(i2s_stm32_sai_continuous_rx, NULL, NULL, NULL, NULL, NULL);
