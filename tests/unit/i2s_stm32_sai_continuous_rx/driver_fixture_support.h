@@ -325,11 +325,13 @@ static struct sai_continuous_node_storage fixture_node_storage[SAI_CONT_RX_NODE_
 
 static inline int HAL_SAI_DMAStop(SAI_HandleTypeDef *hsai)
 {
-	fixture_dma_registers.CCR &= ~DMA_CCR_EN;
 	hsai->Instance->CR1 &= ~(SAI_xCR1_DMAEN | SAI_xCR1_SAIEN);
-	fixture_dma_registers.CSR |= DMA_CSR_IDLEF;
+	if (hsai->State == HAL_SAI_STATE_BUSY_RX && hsai->hdmarx != NULL) {
+		fixture_dma_registers.CCR &= ~DMA_CCR_EN;
+		fixture_dma_registers.CSR |= DMA_CSR_IDLEF;
+		hsai->hdmarx->State = HAL_DMA_STATE_READY;
+	}
 	hsai->State = HAL_SAI_STATE_READY;
-	hsai->hdmarx->State = HAL_DMA_STATE_READY;
 	return HAL_OK;
 }
 

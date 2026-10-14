@@ -558,6 +558,20 @@ ZTEST(i2s_stm32_sai_continuous_rx, test_list_init_timeout_requires_drop_before_r
 	}
 
 	fixture_list_init_fails = false;
+	zassert_equal(-EIO,
+		      stm32_sai_sub_trigger(&fixture_device, I2S_DIR_RX, I2S_TRIGGER_DROP));
+	zassert_equal(I2S_STATE_ERROR, fixture_data.stream.state);
+	zassert_false(fixture_data.stream.continuous_quiesced);
+	zassert_true((fixture_dma_registers.CCR & DMA_CCR_EN) != 0U);
+	zassert_equal(0U, fixture_deinit_count);
+	for (uint8_t i = 0U; i < SAI_CONT_RX_NODE_COUNT; i++) {
+		zassert_is_null(fixture_data.stream.continuous_blocks[i]);
+		zassert_equal(SAI_CONT_RX_NODE_FREE,
+			      fixture_data.stream.continuous_node_state[i]);
+	}
+
+	/* HAL_SAI_DMAStop cannot abort DMA before SAI enters BUSY_RX. */
+	fixture_complete_dma_stop();
 	zassert_ok(stm32_sai_sub_trigger(&fixture_device, I2S_DIR_RX, I2S_TRIGGER_DROP));
 	zassert_equal(I2S_STATE_READY, fixture_data.stream.state);
 	zassert_true(fixture_data.stream.continuous_quiesced);
