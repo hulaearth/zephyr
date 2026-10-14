@@ -91,10 +91,10 @@ ZTEST(stm32_lptim_timer, test_standby_elapsed_cycles_update_under_lock)
 {
 	uint64_t cycle_count;
 
-	/* Model a 32 kHz source divided by the supported prescaler of two. */
+	/* Model a 32,768 Hz source divided by the supported prescaler of two. */
 	lptim_clock_freq = CONFIG_STM32_LPTIM_CLOCK / 2U;
 	fake_hw_cycles_per_sec = CONFIG_STM32_LPTIM_CLOCK;
-	accumulated_lptim_cnt = 0U;
+	accumulated_lptim_cnt = 1ULL << 32;
 	timeout_stdby = true;
 	lptim_cnt_pre_stdby = 200U;
 	stdby_timer_pre_stdby = 100U;
@@ -107,14 +107,14 @@ ZTEST(stm32_lptim_timer, test_standby_elapsed_cycles_update_under_lock)
 
 	sys_clock_idle_exit();
 
-	zassert_equal(16584U, accumulated_lptim_cnt);
+	zassert_equal((1ULL << 32) + 16584U, accumulated_lptim_cnt);
 	zassert_equal(1U, fake_lock_count);
 	zassert_equal(0U, fake_lock_depth);
 	zassert_equal(4146U, fake_announced_ticks);
 	zassert_false(timeout_stdby);
 
 	cycle_count = sys_clock_cycle_get_64();
-	zassert_equal(33168U, cycle_count);
+	zassert_equal((1ULL << 33) + 33168U, cycle_count);
 	zassert_equal(2U, fake_lock_count);
 	zassert_equal(0U, fake_lock_depth);
 }
