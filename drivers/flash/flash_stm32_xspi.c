@@ -46,6 +46,7 @@
  */
 #define DT_DRV_COMPAT st_stm32_xspi_nor
 
+#include <zephyr/drivers/stm32_xspi_timing.h>
 #include <errno.h>
 #include <zephyr/kernel.h>
 #include <soc.h>
@@ -1534,6 +1535,12 @@ static int flash_stm32_xspi_write(const struct device *dev, off_t addr,
 		return 0;
 	}
 
+	/* Octal DTR page programs require an even address and byte count. */
+	if ((data_mode == XSPI_OCTO_MODE) && (data_rate == XSPI_DTR_TRANSFER) &&
+	    (((addr & 1) != 0) || ((size & 1) != 0))) {
+		return -EINVAL;
+	}
+
 	const off_t write_addr = addr;
 	const size_t write_size = size;
 
@@ -1692,11 +1699,20 @@ static const struct flash_parameters flash_stm32_xspi_parameters = {
 	.erase_value = 0xff
 };
 
+static const struct flash_parameters flash_stm32_xspi_dtr_parameters = {
+	.write_block_size = 2,
+	.erase_value = 0xff
+};
+
 static const struct flash_parameters *
 flash_stm32_xspi_get_parameters(const struct device *dev)
 {
-	ARG_UNUSED(dev);
+	const struct flash_stm32_xspi_config *dev_cfg = dev->config;
 
+	if ((dev_cfg->data_mode == XSPI_OCTO_MODE) &&
+	    (dev_cfg->data_rate == XSPI_DTR_TRANSFER)) {
+		return &flash_stm32_xspi_dtr_parameters;
+	}
 	return &flash_stm32_xspi_parameters;
 }
 
@@ -2329,7 +2345,7 @@ static int flash_stm32_xspi_dma_init(DMA_HandleTypeDef *hdma, struct stream *dma
 #endif /* CONFIG_FLASH_STM32_XSPI_DMA */
 
 
-static int flash_stm32_xspi_init(const struct device *dev)
+static int flash_stm32_xspi_init_impl(const struct device *dev)
 {
 	const struct flash_stm32_xspi_config *dev_cfg = dev->config;
 	struct flash_stm32_xspi_data *dev_data = dev->data;
@@ -2679,6 +2695,15 @@ static int flash_stm32_xspi_init(const struct device *dev)
 		dev_cfg->flash_size);
 #endif /* CONFIG_FLASH_STM32_NOR_MEMMAP*/
 	return 0;
+}
+
+static int flash_stm32_xspi_init(const struct device *dev)
+{
+	STM32_XSPI_INIT_TIME_BEGIN(init_start);
+	int ret = flash_stm32_xspi_init_impl(dev);
+
+	STM32_XSPI_INIT_TIME_END("nor_init", init_start, ret);
+	return ret;
 }
 
 

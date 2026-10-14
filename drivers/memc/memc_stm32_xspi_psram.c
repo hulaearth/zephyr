@@ -6,6 +6,7 @@
 
 #define DT_DRV_COMPAT st_stm32_xspi_psram
 
+#include <zephyr/drivers/stm32_xspi_timing.h>
 #include <errno.h>
 #include <soc.h>
 #include <stm32_bitops.h>
@@ -142,7 +143,12 @@ static int ap_memory_read_reg(XSPI_HandleTypeDef *hxspi, uint32_t address, uint8
 	cmd.DataMode = HAL_XSPI_DATA_8_LINES;
 	cmd.DataLength = 2U;
 	cmd.DataDTRMode = HAL_XSPI_DATA_DTR_ENABLE;
+#if defined(CONFIG_SOC_SERIES_STM32N6X)
+	/* STM32N6 APS512 register reads encode latency as latency_cycles - 1. */
+	cmd.DummyCycles = latency_cycles - 1U;
+#else
 	cmd.DummyCycles = latency_cycles;
+#endif
 	cmd.DQSMode = HAL_XSPI_DQS_ENABLE;
 
 	/* Configure the command */
@@ -226,7 +232,7 @@ static int ap_memory_configure(XSPI_HandleTypeDef *hxspi)
 	return 0;
 }
 
-static int memc_stm32_xspi_psram_init(const struct device *dev)
+static int memc_stm32_xspi_psram_init_impl(const struct device *dev)
 {
 	const struct memc_stm32_xspi_psram_config *dev_cfg = dev->config;
 	struct memc_stm32_xspi_psram_data *dev_data = dev->data;
@@ -390,6 +396,15 @@ static int memc_stm32_xspi_psram_init(const struct device *dev)
 #endif
 
 	return 0;
+}
+
+static int memc_stm32_xspi_psram_init(const struct device *dev)
+{
+	STM32_XSPI_INIT_TIME_BEGIN(init_start);
+	int ret = memc_stm32_xspi_psram_init_impl(dev);
+
+	STM32_XSPI_INIT_TIME_END("psram_init", init_start, ret);
+	return ret;
 }
 
 PINCTRL_DT_DEFINE(STM32_XSPI_NODE);
