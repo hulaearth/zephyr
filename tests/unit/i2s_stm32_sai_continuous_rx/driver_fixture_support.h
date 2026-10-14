@@ -22,7 +22,10 @@
 
 #include "i2s_stm32_sai_rx_ring.h"
 
+static int continuous_rx_quiesce(const struct device *dev, bool preserve_queue);
+
 #define CONFIG_I2S_STM32_SAI_CONTINUOUS_RX_N6 1
+#define CONFIG_SOC_SERIES_STM32N6X 1
 #define CONFIG_I2S_STM32_SAI_BLOCK_COUNT 8
 #define SAI_CONT_RX_NODE_COUNT 8U
 #define SAI_CONT_RX_NODE_FREE 0U
@@ -46,8 +49,18 @@
 #define DMA_IT_TO BIT(5)
 #define DMA_IT_SUSP BIT(6)
 #define DMA_CCR_EN BIT(0)
+#define DMA_CCR_LSM BIT(8)
 #define DMA_CCR_SUSP BIT(1)
 #define DMA_CCR_RESET BIT(2)
+#define DMA_NORMAL 0U
+#define DMA_LINKEDLIST BIT(4)
+#define DMA_ADDR_ADJ_INCREMENT 1U
+#define DMA_ADDR_ADJ_NO_CHANGE 0U
+#define STM32_DMA_HAL_OVERRIDE 1U
+#define HAL_DMA_STATE_RESET 0U
+#define HAL_DMA_STATE_READY 1U
+#define HAL_DMA_STATE_BUSY 2U
+#define HAL_DMA_STATE_ERROR 3U
 #define DMA_CSR_IDLEF BIT(0)
 #define DMA_CLLR_LA 0xffffffc0U
 #define DMA_CLBAR_LBA 0xfffffe00U
@@ -74,6 +87,43 @@
 #define SAI_xSR_LFSDET BIT(3)
 #define SAI_xCR1_DMAEN BIT(0)
 #define SAI_xCR1_SAIEN BIT(1)
+#define SAI_ASYNCHRONOUS 0U
+#define SAI_SYNCHRONOUS 1U
+#define SAI_MODEMASTER_RX 0U
+#define SAI_MODESLAVE_RX 1U
+#define SAI_MODEMASTER_TX 2U
+#define SAI_MODESLAVE_TX 3U
+#define SAI_FIFOTHRESHOLD_HF 1U
+#define SAI_FIFOTHRESHOLD_FULL 2U
+#define SAI_AUDIO_FREQUENCY_384K 384000U
+#define SAI_AUDIO_FREQUENCY_192K 192000U
+#define SAI_AUDIO_FREQUENCY_96K 96000U
+#define SAI_AUDIO_FREQUENCY_48K 48000U
+#define SAI_AUDIO_FREQUENCY_44K 44100U
+#define SAI_AUDIO_FREQUENCY_32K 32000U
+#define SAI_AUDIO_FREQUENCY_22K 22050U
+#define SAI_AUDIO_FREQUENCY_16K 16000U
+#define SAI_AUDIO_FREQUENCY_11K 11025U
+#define SAI_AUDIO_FREQUENCY_8K 8000U
+#define SAI_MASTERDIVIDER_DISABLE 0U
+#define SAI_MASTERDIVIDER_ENABLE 1U
+#define SAI_PROTOCOL_DATASIZE_16BIT 16U
+#define SAI_PROTOCOL_DATASIZE_24BIT 24U
+#define SAI_PROTOCOL_DATASIZE_32BIT 32U
+#define SAI_MONOMODE 1U
+#define SAI_STEREOMODE 2U
+#define SAI_I2S_STANDARD 0U
+#define SAI_I2S_MSBJUSTIFIED 1U
+#define SAI_I2S_LSBJUSTIFIED 2U
+#define SAI_PCM_SHORT 3U
+#define SAI_PCM_LONG 4U
+#define MCLK_NO_DIV 0U
+#define MCLK_DIV_256 1U
+
+enum mclk_divider {
+	FIXTURE_MCLK_NO_DIV = MCLK_NO_DIV,
+	FIXTURE_MCLK_DIV_256 = MCLK_DIV_256,
+};
 #define SAI_FLAG_OVRUDR BIT(0)
 #define SAI_FLAG_WCKCFG BIT(1)
 #define SAI_FLAG_AFSDET BIT(2)
@@ -93,11 +143,13 @@
 #define ARG_UNUSED(x) (void)(x)
 #define LOG_ERR(...) do { } while (false)
 #define LOG_DBG(...) do { } while (false)
+#define LOG_WRN(...) do { } while (false)
 #define __HAL_DMA_GET_FLAG(hdma, mask) ((hdma)->flags & (mask))
 #define __HAL_DMA_CLEAR_FLAG(hdma, mask) ((hdma)->flags &= ~(mask))
 #define __HAL_DMA_DISABLE(hdma) ((hdma)->Instance->CCR |= (DMA_CCR_SUSP | DMA_CCR_RESET))
 #define __HAL_DMA_DISABLE_IT(hdma, mask) do { ARG_UNUSED(hdma); ARG_UNUSED(mask); } while (false)
 #define __HAL_DMA_ENABLE_IT(hdma, mask) do { ARG_UNUSED(hdma); ARG_UNUSED(mask); } while (false)
+#define __HAL_LINKDMA(hsai, field, hdma) do { (hsai)->field = &(hdma); (hdma).Parent = (hsai); } while (false)
 #define __HAL_SAI_CLEAR_FLAG(hsai, mask) do { ARG_UNUSED(hsai); ARG_UNUSED(mask); } while (false)
 #define __HAL_SAI_ENABLE(hsai) ((hsai)->Instance->CR1 |= SAI_xCR1_SAIEN)
 #define __HAL_SAI_DISABLE(hsai) ((hsai)->Instance->CR1 &= ~SAI_xCR1_SAIEN)
@@ -119,6 +171,7 @@ typedef struct {
 	uint32_t Priority;
 	uint32_t TransferEventMode;
 	uint32_t TransferAllocatedPort;
+	uint32_t Mode;
 } DMA_InitTypeDef;
 
 typedef struct {
@@ -154,6 +207,9 @@ typedef struct {
 typedef struct DMA_HandleTypeDef {
 	DMA_Channel_TypeDef *Instance;
 	DMA_InitTypeDef Init;
+	uint32_t Mode;
+	uint32_t State;
+	DMA_QListTypeDef *LinkedListQueue;
 	DMA_InitLinkedListTypeDef InitLinkedList;
 	void *Parent;
 	uint32_t flags;
@@ -170,7 +226,19 @@ typedef struct {
 } SAI_TypeDef;
 
 typedef struct {
+	uint32_t AudioMode;
+	uint32_t Synchro;
+	uint32_t FIFOThreshold;
+	uint32_t AudioFrequency;
+	uint32_t NoDivider;
+	uint32_t MonoStereoMode;
+} SAI_InitTypeDef;
+
+typedef struct {
 	SAI_TypeDef *Instance;
+	SAI_InitTypeDef Init;
+	DMA_HandleTypeDef *hdmatx;
+	DMA_HandleTypeDef *hdmarx;
 	uint32_t State;
 	uint32_t ErrorCode;
 	void *pBuffPtr;
@@ -231,13 +299,27 @@ struct stm32_sai_sub_data {
 };
 
 struct stm32_sai_sub_cfg {
+	void *pincfg;
+	bool mclk_enable;
+	enum mclk_divider mclk_div;
+	bool synchronous;
 	enum i2s_dir dir;
+	const struct device *controller;
 };
 
 static DMA_Channel_TypeDef fixture_dma_registers;
 static SAI_TypeDef fixture_sai_registers;
 static bool fixture_deinit_fails;
+static bool fixture_list_init_fails;
+static bool fixture_list_start_fails;
+static bool fixture_list_start_fails_after_enable;
 static unsigned int fixture_deinit_count;
+static unsigned int fixture_list_start_count;
+static unsigned int fixture_normal_start_count;
+static bool fixture_sai_rx_used_linked_list;
+static void *fixture_normal_start_destination;
+static unsigned int fixture_sai_rx_linked_list_count;
+static unsigned int fixture_sai_rx_stale_queue_start_count;
 static struct sai_continuous_node_storage fixture_node_storage[SAI_CONT_RX_NODE_COUNT]
 	__aligned(512);
 
@@ -247,6 +329,7 @@ static inline int HAL_SAI_DMAStop(SAI_HandleTypeDef *hsai)
 	hsai->Instance->CR1 &= ~(SAI_xCR1_DMAEN | SAI_xCR1_SAIEN);
 	fixture_dma_registers.CSR |= DMA_CSR_IDLEF;
 	hsai->State = HAL_SAI_STATE_READY;
+	hsai->hdmarx->State = HAL_DMA_STATE_READY;
 	return HAL_OK;
 }
 
@@ -256,13 +339,24 @@ static inline int HAL_DMAEx_List_DeInit(DMA_HandleTypeDef *hdma)
 	if (fixture_deinit_fails) {
 		return HAL_ERROR;
 	}
+	hdma->Mode = DMA_NORMAL;
+	hdma->State = HAL_DMA_STATE_RESET;
+	hdma->LinkedListQueue = NULL;
+	hdma->Parent = NULL;
 	hdma->Instance->CSR |= DMA_CSR_IDLEF;
 	return HAL_OK;
 }
 
 static inline int HAL_DMAEx_List_Init(DMA_HandleTypeDef *hdma)
 {
-	ARG_UNUSED(hdma);
+	if (fixture_list_init_fails) {
+		hdma->State = HAL_DMA_STATE_ERROR;
+		hdma->Instance->CCR |= DMA_CCR_EN;
+		return HAL_ERROR;
+	}
+	hdma->Mode = DMA_LINKEDLIST;
+	hdma->State = HAL_DMA_STATE_READY;
+	hdma->Instance->CCR |= DMA_CCR_LSM;
 	return HAL_OK;
 }
 
@@ -275,22 +369,38 @@ static inline int HAL_DMA_ConfigChannelAttributes(DMA_HandleTypeDef *hdma, uint3
 
 static inline int HAL_DMAEx_List_BuildNode(const DMA_NodeConfTypeDef *conf, DMA_NodeTypeDef *node)
 {
-	ARG_UNUSED(conf);
 	memset(node, 0, sizeof(*node));
+	node->LinkRegisters[4] = conf->DstAddress;
 	return HAL_OK;
 }
 
 static inline int HAL_DMAEx_List_LinkQ(DMA_HandleTypeDef *hdma, DMA_QListTypeDef *queue)
 {
-	ARG_UNUSED(hdma);
-	ARG_UNUSED(queue);
+	hdma->LinkedListQueue = queue;
 	return HAL_OK;
 }
 
 static inline int HAL_DMAEx_List_Start_IT(DMA_HandleTypeDef *hdma)
 {
+	fixture_list_start_count++;
+	if (fixture_list_start_fails) {
+		return HAL_ERROR;
+	}
+	if (hdma->LinkedListQueue == NULL ||
+	    (hdma->State != HAL_DMA_STATE_READY &&
+	     !(hdma->State == HAL_DMA_STATE_BUSY &&
+	       (hdma->Instance->CCR & DMA_CCR_LSM) != 0U))) {
+		return HAL_ERROR;
+	}
+	if (hdma->State == HAL_DMA_STATE_READY) {
+		hdma->State = HAL_DMA_STATE_BUSY;
+	}
 	hdma->Instance->CCR |= DMA_CCR_EN;
+	hdma->Instance->CCR |= DMA_CCR_LSM;
 	hdma->Instance->CSR &= ~DMA_CSR_IDLEF;
+	if (fixture_list_start_fails_after_enable) {
+		return HAL_ERROR;
+	}
 	return HAL_OK;
 }
 
@@ -309,10 +419,89 @@ static inline int HAL_SAI_Transmit_DMA(SAI_HandleTypeDef *hsai, void *buffer, ui
 
 static inline int HAL_SAI_Receive_DMA(SAI_HandleTypeDef *hsai, void *buffer, uint32_t size)
 {
-	ARG_UNUSED(hsai);
-	ARG_UNUSED(buffer);
-	ARG_UNUSED(size);
+	if (hsai->State != HAL_SAI_STATE_READY || buffer == NULL || size == 0U) {
+		return HAL_ERROR;
+	}
+	if ((hsai->hdmarx->Mode & DMA_LINKEDLIST) == DMA_LINKEDLIST) {
+		fixture_sai_rx_used_linked_list = true;
+		fixture_sai_rx_linked_list_count++;
+		if (hsai->hdmarx->LinkedListQueue == NULL) {
+			return HAL_ERROR;
+		}
+		if (hsai->hdmarx->State == HAL_DMA_STATE_BUSY &&
+		    (hsai->hdmarx->Instance->CCR & DMA_CCR_LSM) != 0U) {
+			fixture_sai_rx_stale_queue_start_count++;
+		}
+		hsai->hdmarx->LinkedListQueue->Head->LinkRegisters[4] =
+			(uint32_t)(uintptr_t)buffer;
+		if (HAL_DMAEx_List_Start_IT(hsai->hdmarx) != HAL_OK) {
+			return HAL_ERROR;
+		}
+		hsai->State = HAL_SAI_STATE_BUSY_RX;
+		return HAL_OK;
+	}
+	fixture_normal_start_count++;
+	fixture_normal_start_destination = buffer;
+	if (hsai->hdmarx->State != HAL_DMA_STATE_READY) {
+		return HAL_ERROR;
+	}
+	hsai->hdmarx->State = HAL_DMA_STATE_BUSY;
+	hsai->hdmarx->Instance->CCR |= DMA_CCR_EN;
+	hsai->State = HAL_SAI_STATE_BUSY_RX;
 	return HAL_OK;
+}
+
+static inline int HAL_DMA_Init(DMA_HandleTypeDef *hdma)
+{
+	hdma->Mode = hdma->Init.Mode;
+	hdma->State = HAL_DMA_STATE_READY;
+	hdma->LinkedListQueue = NULL;
+	hdma->Instance->CCR &= ~DMA_CCR_LSM;
+	return HAL_OK;
+}
+
+static inline int dma_stm32_zcfg_to_halcfg(const struct device *dev,
+					    const struct dma_config *config,
+					    DMA_InitTypeDef *hal_config,
+					    uint16_t source_adjust,
+					    uint16_t destination_adjust)
+{
+	ARG_UNUSED(dev);
+	ARG_UNUSED(config);
+	ARG_UNUSED(source_adjust);
+	ARG_UNUSED(destination_adjust);
+	hal_config->Mode = DMA_NORMAL;
+	return 0;
+}
+
+static inline DMA_Channel_TypeDef *fixture_dma_get_instance(DMA_TypeDef *reg,
+							      uint32_t channel)
+{
+	ARG_UNUSED(reg);
+	ARG_UNUSED(channel);
+	return &fixture_dma_registers;
+}
+
+#define STM32_DMA_GET_INSTANCE(reg, channel) fixture_dma_get_instance((reg), (channel))
+
+static inline int HAL_SAI_InitProtocol(SAI_HandleTypeDef *hsai, uint32_t protocol,
+					      uint32_t word_size, uint32_t slots)
+{
+	ARG_UNUSED(protocol);
+	ARG_UNUSED(word_size);
+	ARG_UNUSED(slots);
+	hsai->State = HAL_SAI_STATE_READY;
+	return HAL_OK;
+}
+
+static inline uint32_t stm32_reg_read(volatile uint32_t *reg)
+{
+	return *reg;
+}
+
+static inline void stm32_reg_write(volatile uint32_t *reg, uint32_t value)
+{
+	*reg = value;
 }
 
 static inline void sys_cache_data_flush_range(void *address, size_t size)

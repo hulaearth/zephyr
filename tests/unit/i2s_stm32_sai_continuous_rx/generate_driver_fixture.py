@@ -13,8 +13,10 @@ FUNCTIONS = (
 	("static int continuous_rx_start", "continuous_rx_start"),
 	("static int continuous_rx_quiesce", "continuous_rx_quiesce"),
 	("static uint8_t continuous_rx_stop_target", "continuous_rx_stop_target"),
+	("static int sai_sub_dma_init", "sai_sub_dma_init"),
 	("static int stream_start", "stream_start"),
 	("static void queue_drop", "queue_drop"),
+	("static int stm32_sai_sub_conf", "stm32_sai_sub_conf"),
 	("static int stm32_sai_sub_read", "stm32_sai_sub_read"),
 	("int stm32_sai_rx_release", "stm32_sai_rx_release"),
 	("static int stm32_sai_sub_trigger", "stm32_sai_sub_trigger"),
@@ -22,8 +24,29 @@ FUNCTIONS = (
 
 
 def extract_function(source: str, signature: str) -> str:
-	start = source.index(signature)
-	body = source.index("{", start)
+	search = 0
+	while True:
+		start = source.index(signature, search)
+		open_paren = source.index("(", start + len(signature))
+		depth = 0
+		close_paren = open_paren
+		while close_paren < len(source):
+			if source[close_paren] == "(":
+				depth += 1
+			elif source[close_paren] == ")":
+				depth -= 1
+				if depth == 0:
+					break
+			close_paren += 1
+		terminator = close_paren + 1
+		while source[terminator].isspace():
+			terminator += 1
+		if source[terminator] == "{":
+			body = terminator
+			break
+		if source[terminator] != ";":
+			raise ValueError(f"unexpected token after function signature: {signature}")
+		search = terminator + 1
 	depth = 0
 	state = "code"
 	i = body

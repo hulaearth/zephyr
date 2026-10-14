@@ -704,6 +704,10 @@ static int stm32_sai_sub_f4_clk_src_conf(const struct device *dev)
 }
 #endif /* CONFIG_SOC_SERIES_STM32F4X */
 
+#if defined(CONFIG_I2S_STM32_SAI_CONTINUOUS_RX_N6)
+static int continuous_rx_quiesce(const struct device *dev, bool preserve_queue);
+#endif
+
 static int stm32_sai_sub_conf(const struct device *dev, enum i2s_dir dir,
 				   const struct i2s_config *i2s_cfg)
 {
@@ -713,11 +717,28 @@ static int stm32_sai_sub_conf(const struct device *dev, enum i2s_dir dir,
 	SAI_HandleTypeDef *hsai = &sub_data->hsai;
 	uint8_t protocol;
 	uint8_t word_size;
+	if (stream->state != I2S_STATE_NOT_READY && stream->state != I2S_STATE_READY) {
+		LOG_ERR("Invalid state: %d", (int)stream->state);
+		return -EINVAL;
+	}
 #if defined(CONFIG_I2S_STM32_SAI_CONTINUOUS_RX_N6)
 	for (uint8_t i = 0U; i < SAI_CONT_RX_NODE_COUNT; i++) {
 		if (stream->continuous_blocks[i] != NULL ||
 		    stream->continuous_node_state[i] != SAI_CONT_RX_NODE_FREE) {
 			return -EBUSY;
+		}
+	}
+	if (stream->continuous_rx &&
+	    (stream->continuous_stopped || stream->continuous_quiesced)) {
+		int err = continuous_rx_quiesce(dev, false);
+
+		if (err != 0) {
+			return err;
+		}
+		/* List deinit leaves HAL DMA RESET; restore normal mode and SAI linkage. */
+		err = sai_sub_dma_init(dev);
+		if (err != 0) {
+			return err;
 		}
 	}
 #endif
@@ -786,11 +807,6 @@ static int stm32_sai_sub_conf(const struct device *dev, enum i2s_dir dir,
 		}
 	} else {
 		LOG_ERR("Either RX or TX direction must be selected");
-		return -EINVAL;
-	}
-
-	if (stream->state != I2S_STATE_NOT_READY && stream->state != I2S_STATE_READY) {
-		LOG_ERR("Invalid state: %d", (int)stream->state);
 		return -EINVAL;
 	}
 
@@ -1107,6 +1123,8 @@ static int continuous_rx_start(const struct device *dev)
 	hdma->InitLinkedList.LinkedListMode = DMA_LINKEDLIST_NORMAL;
 	hdma->InitLinkedList.LinkAllocatedPort = DMA_LINK_ALLOCATED_PORT1;
 	if (HAL_DMAEx_List_Init(hdma) != HAL_OK) {
+		stream->continuous_fault = true;
+		stream->state = I2S_STATE_ERROR;
 		return -EIO;
 	}
 	hdma->Parent = hsai;
@@ -1184,7 +1202,11 @@ static int continuous_rx_start(const struct device *dev)
 	return 0;
 
 free_blocks:
-	(void)HAL_DMAEx_List_DeInit(hdma);
+	if (HAL_DMAEx_List_DeInit(hdma) != HAL_OK) {
+		stream->continuous_fault = true;
+		stream->state = I2S_STATE_ERROR;
+		return -EIO;
+	}
 	for (uint8_t i = 0U; i < SAI_CONT_RX_NODE_COUNT; i++) {
 		if (stream->continuous_blocks[i] != NULL) {
 			k_mem_slab_free(stream->i2s_cfg.mem_slab, stream->continuous_blocks[i]);
@@ -1192,6 +1214,7 @@ free_blocks:
 		}
 		stream->continuous_node_state[i] = SAI_CONT_RX_NODE_FREE;
 	}
+	stream->continuous_quiesced = true;
 	return -EIO;
 }
 
