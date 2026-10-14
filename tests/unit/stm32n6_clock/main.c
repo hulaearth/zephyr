@@ -8,6 +8,7 @@
 
 uint32_t fixture_pll4_rate(void);
 uint32_t fixture_ic_rate(uint32_t source, uint32_t divider);
+uint32_t fixture_ic1_subsys_rate(uint32_t source, uint32_t divider);
 uint32_t fixture_sys_rate(uint32_t source, uint32_t hsi_div, uint32_t msi_freq,
 			  uint32_t pll_source, uint32_t ic_div);
 void fixture_reset(void);
@@ -51,7 +52,10 @@ ZTEST(stm32n6_clock, test_sys_rate_reads_live_source_and_dividers)
 	const uint32_t ic2 = 4U;
 
 	zassert_equal(fixture_sys_rate(hse, 0U, 0U, 0U, 0U), 32768000U);
-	zassert_equal(fixture_sys_rate(hsi, 1U, 0U, 0U, 0U), 32000000U);
+	zassert_equal(fixture_sys_rate(hsi, 0U, 0U, 0U, 0U), 64000000U);
+	zassert_equal(fixture_sys_rate(hsi, 1U << 7, 0U, 0U, 0U), 32000000U);
+	zassert_equal(fixture_sys_rate(hsi, 2U << 7, 0U, 0U, 0U), 16000000U);
+	zassert_equal(fixture_sys_rate(hsi, 3U << 7, 0U, 0U, 0U), 8000000U);
 	zassert_equal(fixture_sys_rate(msi, 0U, 4000000U, 0U, 0U), 4000000U);
 	zassert_equal(fixture_sys_rate(ic2, 0U, 0U, 4U, 5U), 49152000U);
 	zassert_equal(fixture_sys_rate(99U, 0U, 0U, 0U, 0U), 0U);
@@ -60,6 +64,12 @@ ZTEST(stm32n6_clock, test_sys_rate_reads_live_source_and_dividers)
 ZTEST(stm32n6_clock, test_ic_source_with_dynamic_divider)
 {
 	zassert_equal(fixture_ic_rate(4U, 5U), 49152000U);
+}
+
+ZTEST(stm32n6_clock, test_ic1_subsys_rate_uses_live_divider)
+{
+	/* DT config is 2, while the accepted HAL getter supplies the live value 5. */
+	zassert_equal(fixture_ic1_subsys_rate(4U, 5U), 49152000U);
 }
 
 ZTEST(stm32n6_clock, test_normal_init_releases_only_unconfigured_plls_after_handoff)

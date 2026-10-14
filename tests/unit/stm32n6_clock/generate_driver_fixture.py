@@ -46,6 +46,7 @@ def main() -> None:
 	fixture = r"""#include <errno.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <zephyr/dt-bindings/clock/stm32n6_clock.h>
 
 #define __unused __attribute__((unused))
 #define __ASSERT(condition, ...) do { (void)(condition); } while (0)
@@ -79,11 +80,17 @@ def main() -> None:
 #define STM32_PLL4_P2_DIVISOR 2
 #define STM32_HSI_FREQ 64000000U
 #define STM32_HSE_FREQ 32768000U
+#define STM32_HSE_DIV2 0
+#define STM32_HSI_DIVISOR 2U
 #define STM32_HSE_ENABLED 1
 #define STM32_HSI_ENABLED 1
 #define STM32_MSI_ENABLED 1
+#define STM32_IC1_ENABLED 1
 #define STM32_IC2_ENABLED 1
-#define RCC_HSICFGR_HSIDIV_Pos 0
+#define STM32_IC1_DIV 2U
+#define STM32_IC2_DIV 5U
+#define RCC_HSICFGR_HSIDIV_Pos 7
+#define RCC_HSICFGR_HSIDIV_Msk (0x3U << RCC_HSICFGR_HSIDIV_Pos)
 #define LL_RCC_ICCLKSOURCE_PLL1 1U
 #define LL_RCC_ICCLKSOURCE_PLL2 2U
 #define LL_RCC_ICCLKSOURCE_PLL3 3U
@@ -114,10 +121,18 @@ def main() -> None:
 #define apb4_prescaler(value) 1U
 #define apb5_prescaler(value) 1U
 #define timg_prescaler(value) 1U
+typedef void *clock_control_subsys_t;
+
+struct stm32_pclken {
+	uint32_t bus;
+	uint32_t div;
+	uint32_t enr;
+};
 #define LL_RCC_SYS_CLKSOURCE_HSE 1U
 #define LL_RCC_SYS_CLKSOURCE_HSI 2U
 #define LL_RCC_SYS_CLKSOURCE_IC2_IC6_IC11 3U
 #define LL_RCC_SYS_CLKSOURCE_MSI 4U
+#define LL_RCC_CLKP_CLKSOURCE 0U
 #define LL_MEM_AXISRAM1 1U
 #define LL_MEM_AXISRAM2 2U
 #define LL_MEM_AHBSRAM1 4U
@@ -152,6 +167,8 @@ static uint32_t sys_source;
 static uint32_t hsi_divider;
 static uint32_t ic2_source;
 static uint32_t ic2_divider;
+static uint32_t ic1_source;
+static uint32_t ic1_divider;
 static uint32_t msi_frequency;
 static int preserve_boot_config;
 static int events[32];
@@ -216,12 +233,19 @@ static uint32_t LL_RCC_GetSysClkSource(void)
 	record_event(FIXTURE_SYS_READ);
 	return sys_source;
 }
-static uint32_t LL_RCC_HSI_GetDivider(void) { return hsi_divider; }
+static uint32_t LL_RCC_HSI_GetDivider(void) { return hsi_divider & RCC_HSICFGR_HSIDIV_Msk; }
 static uint32_t LL_RCC_IC2_GetSource(void) { return ic2_source; }
 static uint32_t LL_RCC_IC2_GetDivider(void) { return ic2_divider; }
+static uint32_t LL_RCC_IC1_GetSource(void) { return ic1_source; }
+static uint32_t LL_RCC_IC1_GetDivider(void) { return ic1_divider; }
+static uint32_t LL_RCC_GetCLKPClockFreq(uint32_t source) { ARG_UNUSED(source); return 0U; }
 
 """
-	fixture += "\n\n".join(extract_function(source, name) for name in functions[:-1])
+	functions.insert(0, "get_bus_clock")
+	fixture += "\n\n".join(
+		extract_function(source, name)
+		for name in functions[:-1] + ["stm32_clock_control_get_subsys_rate"]
+	)
 	init_source = extract_function(source, "stm32_clock_control_init")
 	fixture += "\n\n" + init_source.replace(
 		"stm32_clock_control_init", "fixture_init_unconfigured"
@@ -256,6 +280,24 @@ uint32_t fixture_pll4_rate(void)
 uint32_t fixture_ic_rate(uint32_t source, uint32_t divider)
 {
 	return get_icout_frequency(source, divider);
+}
+
+uint32_t fixture_ic1_subsys_rate(uint32_t source, uint32_t divider)
+{
+	struct stm32_pclken pclken = {
+		.bus = STM32_SRC_IC1,
+		.div = 0U,
+		.enr = 0U,
+	};
+	uint32_t rate = 0U;
+
+	sys_source = LL_RCC_SYS_CLKSOURCE_STATUS_HSE;
+	ic1_source = source;
+	ic1_divider = divider;
+	if (stm32_clock_control_get_subsys_rate(NULL, &pclken, &rate) != 0) {
+		return 0U;
+	}
+	return rate;
 }
 
 uint32_t fixture_sys_rate(uint32_t source, uint32_t hsi_div, uint32_t msi_freq,
