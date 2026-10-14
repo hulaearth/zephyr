@@ -19,6 +19,11 @@
 
 #include <stm32_ll_dma.h>
 #include <stm32_bitops.h>
+#if defined(CONFIG_I2S_STM32_SAI_CONTINUOUS_RX_N6)
+#include <stm32n6xx_hal_dma_ex.h>
+#include <zephyr/drivers/i2s/stm32_sai.h>
+#include "i2s_stm32_sai_rx_ring.h"
+#endif
 
 #include <zephyr/logging/log.h>
 #include <zephyr/irq.h>
@@ -43,6 +48,32 @@ struct queue_item {
 	size_t size;
 };
 
+#if defined(CONFIG_I2S_STM32_SAI_CONTINUOUS_RX_N6)
+#define SAI_CONT_RX_NODE_COUNT 8U
+#define SAI_CONT_RX_NODE_FREE 0U
+#define SAI_CONT_RX_NODE_DMA 1U
+#define SAI_CONT_RX_NODE_QUEUED 2U
+#define SAI_CONT_RX_NODE_BORROWED 3U
+#define SAI_CONT_RX_LINK_UPDATE_MASK \
+	(DMA_CLLR_UT1 | DMA_CLLR_UT2 | DMA_CLLR_UB1 | DMA_CLLR_USA | DMA_CLLR_UDA | DMA_CLLR_ULL)
+
+struct sai_continuous_node_storage {
+	DMA_NodeTypeDef node;
+	uint32_t padding[7];
+} __aligned(32);
+
+BUILD_ASSERT(sizeof(struct sai_continuous_node_storage) == 64U);
+BUILD_ASSERT(sizeof(struct sai_continuous_node_storage) * SAI_CONT_RX_NODE_COUNT == 512U);
+BUILD_ASSERT(CONFIG_I2S_STM32_SAI_BLOCK_COUNT >= SAI_CONT_RX_NODE_COUNT);
+#define SAI_CONT_NODE_STORAGE_DECL(node) \
+	static struct sai_continuous_node_storage sai_node_storage_##node[SAI_CONT_RX_NODE_COUNT] \
+		__nocache __aligned(512);
+#define SAI_CONT_NODE_STORAGE_INIT(node) .continuous_node_storage = sai_node_storage_##node,
+#else
+#define SAI_CONT_NODE_STORAGE_DECL(node)
+#define SAI_CONT_NODE_STORAGE_INIT(node)
+#endif
+
 struct stream {
 	DMA_TypeDef *reg;
 
@@ -65,6 +96,21 @@ struct stream {
 
 	int (*stream_start)(const struct device *dev, enum i2s_dir dir);
 	void (*queue_drop)(const struct device *dev);
+#if defined(CONFIG_I2S_STM32_SAI_CONTINUOUS_RX_N6)
+	bool continuous_rx;
+	bool continuous_quiesced;
+	bool continuous_fault;
+	DMA_NodeTypeDef *continuous_nodes[SAI_CONT_RX_NODE_COUNT];
+	DMA_NodeTypeDef *continuous_tail;
+	uint32_t continuous_link_mask;
+	DMA_QListTypeDef continuous_queue;
+	void *continuous_blocks[SAI_CONT_RX_NODE_COUNT];
+	uint8_t continuous_node_state[SAI_CONT_RX_NODE_COUNT];
+	uint8_t continuous_next_complete;
+	uint8_t continuous_next_release;
+	atomic_t continuous_queue_high_water;
+	uint32_t continuous_slab_high_water;
+#endif
 };
 
 struct stm32_sai_sub_data {
@@ -72,6 +118,9 @@ struct stm32_sai_sub_data {
 	DMA_HandleTypeDef hdma;
 	struct stream stream;
 	struct queue_item queue_buffer[CONFIG_I2S_STM32_SAI_BLOCK_COUNT];
+#if defined(CONFIG_I2S_STM32_SAI_CONTINUOUS_RX_N6)
+	struct sai_continuous_node_storage *continuous_node_storage;
+#endif
 };
 
 struct stm32_sai_sub_cfg {
@@ -380,6 +429,11 @@ static int sai_sub_init(const struct device *dev)
 	const struct stm32_sai_sub_cfg *sub_cfg = dev->config;
 	struct stream *stream = &sub_data->stream;
 	int ret = 0;
+#if defined(CONFIG_I2S_STM32_SAI_CONTINUOUS_RX_N6)
+	for (uint8_t i = 0U; i < SAI_CONT_RX_NODE_COUNT; i++) {
+		stream->continuous_nodes[i] = &sub_data->continuous_node_storage[i].node;
+	}
+#endif
 
 	/* Configure DT provided pins */
 	ret = pinctrl_apply_state(sub_cfg->pincfg, PINCTRL_STATE_DEFAULT);
@@ -414,6 +468,101 @@ static void dma_callback(const struct device *dma_dev, void *arg, uint32_t chann
 	DMA_HandleTypeDef *hdma = arg;
 
 	ARG_UNUSED(dma_dev);
+#if defined(CONFIG_I2S_STM32_SAI_CONTINUOUS_RX_N6)
+	struct stm32_sai_sub_data *sub_data = CONTAINER_OF(hdma, struct stm32_sai_sub_data, hdma);
+	struct stream *stream = &sub_data->stream;
+	if (stream->continuous_rx) {
+		uint32_t flags = __HAL_DMA_GET_FLAG(hdma, DMA_FLAG_TC | DMA_FLAG_HT | DMA_FLAG_DTE |
+						 DMA_FLAG_ULE | DMA_FLAG_USE | DMA_FLAG_TO | DMA_FLAG_SUSP);
+		if (stream->state != I2S_STATE_RUNNING) {
+			if (flags != 0U) {
+				__HAL_DMA_CLEAR_FLAG(hdma, flags);
+			}
+			return;
+		}
+		uint32_t sai_errors = sub_data->hsai.Instance->SR &
+			(SAI_xSR_OVRUDR | SAI_xSR_WCKCFG | SAI_xSR_AFSDET | SAI_xSR_LFSDET);
+		uint32_t errors = flags & (DMA_FLAG_DTE | DMA_FLAG_ULE | DMA_FLAG_USE |
+					   DMA_FLAG_TO | DMA_FLAG_SUSP);
+		uint32_t tc = flags & DMA_FLAG_TC;
+		uint32_t ht = flags & DMA_FLAG_HT;
+		if (status < 0 || errors != 0U || sai_errors != 0U) {
+			if (flags != 0U) {
+				__HAL_DMA_CLEAR_FLAG(hdma, flags);
+			}
+			stream->continuous_fault = true;
+			stream->state = I2S_STATE_ERROR;
+			hdma->Instance->CCR &= ~DMA_CCR_EN;
+			sub_data->hsai.Instance->CR1 &= ~(SAI_xCR1_DMAEN | SAI_xCR1_SAIEN);
+			return;
+		}
+		if (tc == 0U && ht == 0U) {
+			return;
+		}
+		__HAL_DMA_CLEAR_FLAG(hdma, tc | ht);
+		uintptr_t current = hdma->Instance->CDAR;
+		int active_index = -1;
+		bool ambiguous_boundary = false;
+		for (uint8_t i = 0U; i < SAI_CONT_RX_NODE_COUNT; i++) {
+			uintptr_t start = (uintptr_t)stream->continuous_blocks[i];
+			uintptr_t end = start + stream->i2s_cfg.block_size;
+			if (current > start && current < end) {
+				active_index = i;
+				break;
+			}
+			if (current == start || current == end) {
+				ambiguous_boundary = true;
+			}
+		}
+		bool terminal_end = false;
+		if (active_index < 0 && ambiguous_boundary) {
+			for (uint8_t i = 0U; i < SAI_CONT_RX_NODE_COUNT; i++) {
+				if (stream->continuous_nodes[i] == stream->continuous_tail &&
+				    current == (uintptr_t)stream->continuous_blocks[i] +
+					      stream->i2s_cfg.block_size) {
+					terminal_end = true;
+					break;
+				}
+			}
+		}
+		uint8_t publish_count = 0U;
+		enum sai_rx_prefix_result plan = sai_rx_plan_completed_prefix(
+			stream->continuous_next_complete, (int8_t)active_index,
+			SAI_CONT_RX_NODE_COUNT, stream->continuous_node_state, SAI_CONT_RX_NODE_DMA,
+			ambiguous_boundary, (hdma->Instance->CCR & DMA_CCR_EN) != 0U,
+			terminal_end, &publish_count);
+		if (plan == SAI_RX_PREFIX_DEFER) {
+			return;
+		}
+		if (plan != SAI_RX_PREFIX_READY) {
+			stream->continuous_fault = true;
+			stream->state = I2S_STATE_ERROR;
+			hdma->Instance->CCR &= ~DMA_CCR_EN;
+			sub_data->hsai.Instance->CR1 &= ~(SAI_xCR1_DMAEN | SAI_xCR1_SAIEN);
+			return;
+		}
+		for (uint8_t completed = 0U; completed < publish_count; completed++) {
+			uint8_t i = stream->continuous_next_complete;
+			struct queue_item item = {
+				.buffer = stream->continuous_blocks[i],
+				.size = stream->i2s_cfg.block_size,
+			};
+			if (k_msgq_put(&stream->queue, &item, K_NO_WAIT) != 0) {
+				stream->continuous_fault = true;
+				stream->state = I2S_STATE_ERROR;
+				hdma->Instance->CCR &= ~DMA_CCR_EN;
+				return;
+			}
+			stream->continuous_node_state[i] = SAI_CONT_RX_NODE_QUEUED;
+			stream->continuous_next_complete = (uint8_t)((i + 1U) % SAI_CONT_RX_NODE_COUNT);
+			uint32_t queue_depth = k_msgq_num_used_get(&stream->queue);
+			if (queue_depth > (uint32_t)atomic_get(&stream->continuous_queue_high_water)) {
+				atomic_set(&stream->continuous_queue_high_water, (atomic_val_t)queue_depth);
+			}
+		}
+		return;
+	}
+#endif
 
 	if (status < 0) {
 		LOG_ERR("DMA callback error with channel %d.", channel);
@@ -478,8 +627,23 @@ static int stm32_sai_sub_conf(const struct device *dev, enum i2s_dir dir,
 	SAI_HandleTypeDef *hsai = &sub_data->hsai;
 	uint8_t protocol;
 	uint8_t word_size;
+#if defined(CONFIG_I2S_STM32_SAI_CONTINUOUS_RX_N6)
+	for (uint8_t i = 0U; i < SAI_CONT_RX_NODE_COUNT; i++) {
+		if (stream->continuous_blocks[i] != NULL ||
+		    stream->continuous_node_state[i] != SAI_CONT_RX_NODE_FREE) {
+			return -EBUSY;
+		}
+	}
+#endif
 
 	memcpy(&stream->i2s_cfg, i2s_cfg, sizeof(struct i2s_config));
+#if defined(CONFIG_I2S_STM32_SAI_CONTINUOUS_RX_N6)
+	stream->continuous_rx = dir == I2S_DIR_RX && i2s_cfg->frame_clk_freq == 384000U &&
+				i2s_cfg->word_size == 16U && i2s_cfg->channels == 2U &&
+				i2s_cfg->block_size == 16384U;
+	hsai->Init.FIFOThreshold = stream->continuous_rx ? SAI_FIFOTHRESHOLD_HF :
+								SAI_FIFOTHRESHOLD_FULL;
+#endif
 
 	stream->master = true;
 	if (i2s_cfg->options & I2S_OPT_FRAME_CLK_TARGET ||
@@ -750,6 +914,7 @@ static int stm32_sai_sub_read(const struct device *dev, void **mem_block, size_t
 {
 	const struct stm32_sai_sub_cfg *const sub_cfg = dev->config;
 	struct stm32_sai_sub_data *sub_data = dev->data;
+	struct stream *stream = &sub_data->stream;
 	struct queue_item item;
 	int ret;
 
@@ -758,23 +923,247 @@ static int stm32_sai_sub_read(const struct device *dev, void **mem_block, size_t
 		return -EIO;
 	}
 
-	if (sub_data->stream.state == I2S_STATE_NOT_READY ||
-	    sub_data->stream.state == I2S_STATE_ERROR) {
-		LOG_ERR("RX invalid state: %d", (int)sub_data->stream.state);
+	if (stream->state == I2S_STATE_NOT_READY || stream->state == I2S_STATE_ERROR) {
+		LOG_ERR("RX invalid state: %d", (int)stream->state);
 		return -EIO;
 	}
 
-	ret = k_msgq_get(&sub_data->stream.queue, &item, K_MSEC(sub_data->stream.i2s_cfg.timeout));
+	ret = k_msgq_get(&stream->queue, &item, K_MSEC(stream->i2s_cfg.timeout));
 	if (ret < 0) {
-		LOG_ERR("RX queue: %d", k_msgq_num_used_get(&sub_data->stream.queue));
+	#if defined(CONFIG_I2S_STM32_SAI_CONTINUOUS_RX_N6)
+		if (stream->continuous_rx) {
+			uint32_t sai_status = sub_data->hsai.Instance->SR &
+				(SAI_xSR_OVRUDR | SAI_xSR_WCKCFG | SAI_xSR_AFSDET | SAI_xSR_LFSDET);
+			if (sai_status != 0U) {
+				stream->continuous_fault = true;
+				stream->state = I2S_STATE_ERROR;
+				sub_data->hdma.Instance->CCR &= ~DMA_CCR_EN;
+				sub_data->hsai.Instance->CR1 &= ~(SAI_xCR1_DMAEN | SAI_xCR1_SAIEN);
+				LOG_ERR("SAI continuous RX fault: status=%08x dma=%08x",
+					(unsigned int)sai_status,
+					(unsigned int)__HAL_DMA_GET_FLAG(&sub_data->hdma,
+						DMA_FLAG_TC | DMA_FLAG_HT | DMA_FLAG_DTE |
+						DMA_FLAG_ULE | DMA_FLAG_USE | DMA_FLAG_TO | DMA_FLAG_SUSP));
+				return -EIO;
+			}
+		}
+	#endif
+		LOG_ERR("RX queue: %d", k_msgq_num_used_get(&stream->queue));
 		return ret;
 	}
+#if defined(CONFIG_I2S_STM32_SAI_CONTINUOUS_RX_N6)
+	if (stream->continuous_rx) {
+		bool found = false;
+		for (uint8_t i = 0U; i < SAI_CONT_RX_NODE_COUNT; i++) {
+			if (stream->continuous_blocks[i] == item.buffer &&
+			    stream->continuous_node_state[i] == SAI_CONT_RX_NODE_QUEUED) {
+				stream->continuous_node_state[i] = SAI_CONT_RX_NODE_BORROWED;
+				found = true;
+				break;
+			}
+		}
+		if (!found) {
+			stream->continuous_fault = true;
+			stream->state = I2S_STATE_ERROR;
+			return -EIO;
+		}
+	}
+#endif
 
 	*mem_block = item.buffer;
 	*size = item.size;
 
 	return 0;
 }
+
+#if defined(CONFIG_I2S_STM32_SAI_CONTINUOUS_RX_N6)
+static int continuous_rx_start(const struct device *dev)
+{
+	struct stm32_sai_sub_data *sub_data = dev->data;
+	struct stream *stream = &sub_data->stream;
+	DMA_HandleTypeDef *hdma = &sub_data->hdma;
+	SAI_HandleTypeDef *hsai = &sub_data->hsai;
+	uintptr_t node_base = (uintptr_t)stream->continuous_nodes[0];
+	uintptr_t node_end = (uintptr_t)stream->continuous_nodes[SAI_CONT_RX_NODE_COUNT - 1U] +
+			     sizeof(struct sai_continuous_node_storage);
+
+	if ((node_base & 31U) != 0U ||
+	    ((node_base & DMA_CLBAR_LBA) != ((node_end - 1U) & DMA_CLBAR_LBA))) {
+		return -EINVAL;
+	}
+	for (uint8_t i = 0U; i < SAI_CONT_RX_NODE_COUNT; i++) {
+		if (stream->continuous_node_state[i] != SAI_CONT_RX_NODE_FREE ||
+		    stream->continuous_blocks[i] != NULL) {
+			return -EBUSY;
+		}
+	}
+
+	memset(&stream->continuous_queue, 0, sizeof(stream->continuous_queue));
+	stream->continuous_queue.Type = QUEUE_TYPE_STATIC;
+	stream->continuous_queue.State = HAL_DMA_QUEUE_STATE_READY;
+	stream->continuous_queue.NodeNumber = SAI_CONT_RX_NODE_COUNT;
+	stream->continuous_queue.Head = stream->continuous_nodes[0];
+	stream->continuous_queue.FirstCircularNode = NULL;
+	stream->continuous_next_complete = 0U;
+	stream->continuous_next_release = 0U;
+	atomic_set(&stream->continuous_queue_high_water, 0);
+	stream->continuous_slab_high_water = 0U;
+	stream->continuous_fault = false;
+	stream->continuous_quiesced = false;
+
+	hdma->InitLinkedList.Priority = hdma->Init.Priority;
+	hdma->InitLinkedList.LinkStepMode = DMA_LSM_FULL_EXECUTION;
+	hdma->InitLinkedList.TransferEventMode = DMA_TCEM_EACH_LL_ITEM_TRANSFER;
+	hdma->InitLinkedList.LinkedListMode = DMA_LINKEDLIST_NORMAL;
+	hdma->InitLinkedList.LinkAllocatedPort = DMA_LINK_ALLOCATED_PORT1;
+	if (HAL_DMAEx_List_Init(hdma) != HAL_OK) {
+		return -EIO;
+	}
+	hdma->Parent = hsai;
+	if (HAL_DMA_ConfigChannelAttributes(hdma, DMA_CHANNEL_SEC | DMA_CHANNEL_PRIV |
+					    DMA_CHANNEL_SRC_SEC | DMA_CHANNEL_DEST_SEC) != HAL_OK) {
+		goto free_blocks;
+	}
+
+	for (uint8_t i = 0U; i < SAI_CONT_RX_NODE_COUNT; i++) {
+		memset(&sub_data->continuous_node_storage[i], 0,
+		       sizeof(sub_data->continuous_node_storage[i]));
+		DMA_NodeConfTypeDef conf = {0};
+		if (k_mem_slab_alloc(stream->i2s_cfg.mem_slab, &stream->continuous_blocks[i],
+				     K_NO_WAIT) != 0) {
+			goto free_blocks;
+		}
+		conf.NodeType = DMA_GPDMA_LINEAR_NODE;
+		conf.Init = hdma->Init;
+		conf.Init.TransferEventMode = DMA_TCEM_EACH_LL_ITEM_TRANSFER;
+		conf.Init.TransferAllocatedPort = DMA_SRC_ALLOCATED_PORT0 | DMA_DEST_ALLOCATED_PORT1;
+#if defined(CPU_IN_SECURE_STATE)
+		conf.SrcSecure = DMA_CHANNEL_SRC_SEC;
+		conf.DestSecure = DMA_CHANNEL_DEST_SEC;
+#endif
+		conf.SrcAddress = (uint32_t)&hsai->Instance->DR;
+		conf.DstAddress = (uint32_t)stream->continuous_blocks[i];
+		conf.DataSize = stream->i2s_cfg.block_size;
+		if (HAL_DMAEx_List_BuildNode(&conf, stream->continuous_nodes[i]) != HAL_OK) {
+			k_mem_slab_free(stream->i2s_cfg.mem_slab, stream->continuous_blocks[i]);
+			stream->continuous_blocks[i] = NULL;
+			goto free_blocks;
+		}
+		stream->continuous_node_state[i] = SAI_CONT_RX_NODE_DMA;
+		stream->continuous_slab_high_water = (uint32_t)i + 1U;
+	}
+
+	for (uint8_t i = 0U; i < SAI_CONT_RX_NODE_COUNT; i++) {
+		uint32_t next = (i + 1U < SAI_CONT_RX_NODE_COUNT)
+				? ((uint32_t)stream->continuous_nodes[i + 1U] & DMA_CLLR_LA)
+				: 0U;
+		stream->continuous_link_mask = SAI_CONT_RX_LINK_UPDATE_MASK;
+		stream->continuous_nodes[i]->LinkRegisters[5] = next | (next != 0U ?
+										  SAI_CONT_RX_LINK_UPDATE_MASK : 0U);
+	}
+	stream->continuous_tail = stream->continuous_nodes[SAI_CONT_RX_NODE_COUNT - 1U];
+	if (HAL_DMAEx_List_LinkQ(hdma, &stream->continuous_queue) != HAL_OK) {
+		goto free_blocks;
+	}
+	__HAL_SAI_CLEAR_FLAG(hsai, SAI_FLAG_OVRUDR | SAI_FLAG_WCKCFG |
+				   SAI_FLAG_AFSDET | SAI_FLAG_LFSDET);
+	hsai->pBuffPtr = stream->continuous_blocks[0];
+	hsai->XferSize = stream->i2s_cfg.block_size / stream->dma_src_size;
+	hsai->XferCount = hsai->XferSize;
+	hsai->ErrorCode = HAL_SAI_ERROR_NONE;
+	hsai->State = HAL_SAI_STATE_BUSY_RX;
+	hdma->XferHalfCpltCallback = NULL;
+	hdma->XferCpltCallback = NULL;
+	hdma->XferErrorCallback = NULL;
+	hdma->XferSuspendCallback = NULL;
+	__DSB();
+	if (HAL_DMAEx_List_Start_IT(hdma) != HAL_OK) {
+		if ((hdma->Instance->CCR & DMA_CCR_EN) != 0U) {
+			stream->continuous_fault = true;
+			stream->state = I2S_STATE_ERROR;
+			return -EIO;
+		}
+		hsai->State = HAL_SAI_STATE_READY;
+		goto free_blocks;
+	}
+	__HAL_DMA_ENABLE_IT(hdma, DMA_IT_HT);
+	hsai->Instance->CR1 |= SAI_xCR1_DMAEN;
+	if ((hsai->Instance->CR1 & SAI_xCR1_SAIEN) == 0U) {
+		__HAL_SAI_ENABLE(hsai);
+	}
+	return 0;
+
+free_blocks:
+	(void)HAL_DMAEx_List_DeInit(hdma);
+	for (uint8_t i = 0U; i < SAI_CONT_RX_NODE_COUNT; i++) {
+		if (stream->continuous_blocks[i] != NULL) {
+			k_mem_slab_free(stream->i2s_cfg.mem_slab, stream->continuous_blocks[i]);
+			stream->continuous_blocks[i] = NULL;
+		}
+		stream->continuous_node_state[i] = SAI_CONT_RX_NODE_FREE;
+	}
+	return -EIO;
+}
+
+static int continuous_rx_quiesce(const struct device *dev)
+{
+	struct stm32_sai_sub_data *sub_data = dev->data;
+	struct stream *stream = &sub_data->stream;
+	DMA_HandleTypeDef *hdma = &sub_data->hdma;
+	SAI_HandleTypeDef *hsai = &sub_data->hsai;
+	struct queue_item item;
+	uint32_t interrupt_mask = DMA_IT_TC | DMA_IT_HT | DMA_IT_DTE | DMA_IT_ULE |
+				  DMA_IT_USE | DMA_IT_TO | DMA_IT_SUSP;
+	uint32_t flag_mask = DMA_FLAG_TC | DMA_FLAG_HT | DMA_FLAG_DTE | DMA_FLAG_ULE |
+			     DMA_FLAG_USE | DMA_FLAG_TO | DMA_FLAG_SUSP;
+
+	__HAL_DMA_DISABLE_IT(hdma, interrupt_mask);
+	if ((hdma->Instance->CCR & DMA_CCR_EN) != 0U) {
+		if (HAL_SAI_DMAStop(hsai) != HAL_OK) {
+			stream->state = I2S_STATE_ERROR;
+			stream->continuous_fault = true;
+			return -EIO;
+		}
+	} else {
+		hsai->Instance->CR1 &= ~SAI_xCR1_DMAEN;
+		__HAL_SAI_DISABLE(hsai);
+		if ((hsai->Instance->CR1 & SAI_xCR1_SAIEN) != 0U) {
+			stream->state = I2S_STATE_ERROR;
+			stream->continuous_fault = true;
+			return -EIO;
+		}
+		hsai->State = HAL_SAI_STATE_READY;
+	}
+	if ((hdma->Instance->CCR & DMA_CCR_EN) != 0U ||
+	    (hsai->Instance->CR1 & SAI_xCR1_SAIEN) != 0U ||
+	    (hdma->Instance->CSR & DMA_CSR_IDLEF) == 0U ||
+	    HAL_DMAEx_List_DeInit(hdma) != HAL_OK) {
+		stream->state = I2S_STATE_ERROR;
+		stream->continuous_fault = true;
+		return -EIO;
+	}
+	__HAL_DMA_CLEAR_FLAG(hdma, flag_mask);
+	stream->continuous_quiesced = true;
+	while (k_msgq_get(&stream->queue, &item, K_NO_WAIT) == 0) {
+		for (uint8_t i = 0U; i < SAI_CONT_RX_NODE_COUNT; i++) {
+			if (stream->continuous_blocks[i] == item.buffer &&
+			    stream->continuous_node_state[i] == SAI_CONT_RX_NODE_QUEUED) {
+				stream->continuous_node_state[i] = SAI_CONT_RX_NODE_DMA;
+			}
+		}
+	}
+	for (uint8_t i = 0U; i < SAI_CONT_RX_NODE_COUNT; i++) {
+		if (stream->continuous_node_state[i] != SAI_CONT_RX_NODE_BORROWED &&
+		    stream->continuous_blocks[i] != NULL) {
+			k_mem_slab_free(stream->i2s_cfg.mem_slab, stream->continuous_blocks[i]);
+			stream->continuous_blocks[i] = NULL;
+			stream->continuous_node_state[i] = SAI_CONT_RX_NODE_FREE;
+			stream->continuous_nodes[i]->LinkRegisters[5] = 0U;
+		}
+	}
+	return 0;
+}
+#endif
 
 static int stream_start(const struct device *dev, enum i2s_dir dir)
 {
@@ -801,6 +1190,11 @@ static int stream_start(const struct device *dev, enum i2s_dir dir)
 			return -EIO;
 		}
 	} else {
+#if defined(CONFIG_I2S_STM32_SAI_CONTINUOUS_RX_N6)
+		if (stream->continuous_rx) {
+			return continuous_rx_start(dev);
+		}
+#endif
 
 		ret = k_mem_slab_alloc(stream->i2s_cfg.mem_slab, &stream->mem_block, K_NO_WAIT);
 		if (ret < 0) {
@@ -824,6 +1218,11 @@ static void queue_drop(const struct device *dev)
 	struct stm32_sai_sub_data *sub_data = dev->data;
 	struct stream *stream = &sub_data->stream;
 	struct queue_item item;
+#if defined(CONFIG_I2S_STM32_SAI_CONTINUOUS_RX_N6)
+	if (stream->continuous_rx) {
+		return;
+	}
+#endif
 
 	if (stream->mem_block != NULL) {
 		stream->mem_block = NULL;
@@ -835,6 +1234,109 @@ static void queue_drop(const struct device *dev)
 		k_mem_slab_free(stream->i2s_cfg.mem_slab, item.buffer);
 	}
 }
+
+#if defined(CONFIG_I2S_STM32_SAI_CONTINUOUS_RX_N6)
+int stm32_sai_rx_release(const struct device *dev, void *buffer)
+{
+	struct stm32_sai_sub_data *sub_data;
+	struct stream *stream;
+	uint8_t index;
+	unsigned int key;
+
+	if (dev == NULL || buffer == NULL) {
+		return -EINVAL;
+	}
+	sub_data = dev->data;
+	stream = &sub_data->stream;
+	if (!stream->continuous_rx) {
+		return -ENOTSUP;
+	}
+	for (index = 0U; index < SAI_CONT_RX_NODE_COUNT; index++) {
+		if (stream->continuous_blocks[index] == buffer) {
+			break;
+		}
+	}
+	if (index == SAI_CONT_RX_NODE_COUNT ||
+	    stream->continuous_node_state[index] != SAI_CONT_RX_NODE_BORROWED) {
+		return -EINVAL;
+	}
+
+	key = irq_lock();
+	if (!sai_rx_release_is_ordered(index, stream->continuous_next_release,
+				       stream->continuous_node_state[index],
+				       SAI_CONT_RX_NODE_BORROWED,
+				       stream->continuous_blocks[index] == buffer)) {
+		irq_unlock(key);
+		return -EINVAL;
+	}
+	if (stream->continuous_quiesced) {
+		if (!sai_rx_release_quiesced(index, SAI_CONT_RX_NODE_COUNT,
+					     &stream->continuous_next_release,
+					     stream->continuous_node_state,
+					     SAI_CONT_RX_NODE_BORROWED,
+					     SAI_CONT_RX_NODE_FREE,
+					     stream->continuous_blocks, buffer)) {
+			irq_unlock(key);
+			return -EINVAL;
+		}
+		k_mem_slab_free(stream->i2s_cfg.mem_slab, buffer);
+		stream->continuous_nodes[index]->LinkRegisters[5] = 0U;
+		irq_unlock(key);
+		return 0;
+	}
+	if (stream->continuous_fault || stream->state != I2S_STATE_RUNNING) {
+		irq_unlock(key);
+		return -EIO;
+	}
+	if (index != stream->continuous_next_release) {
+		irq_unlock(key);
+		return -EINVAL;
+	}
+	stream->continuous_nodes[index]->LinkRegisters[5] = 0U;
+	__DSB();
+	stream->continuous_tail->LinkRegisters[5] =
+		((uint32_t)stream->continuous_nodes[index] & DMA_CLLR_LA) |
+		stream->continuous_link_mask;
+	__DSB();
+	if ((sub_data->hdma.Instance->CCR & DMA_CCR_EN) == 0U) {
+		stream->continuous_tail->LinkRegisters[5] = 0U;
+		__DSB();
+		stream->continuous_fault = true;
+		stream->state = I2S_STATE_ERROR;
+		sub_data->hdma.Instance->CCR &= ~DMA_CCR_EN;
+		irq_unlock(key);
+		return -EIO;
+	}
+	stream->continuous_tail = stream->continuous_nodes[index];
+	stream->continuous_node_state[index] = SAI_CONT_RX_NODE_DMA;
+	stream->continuous_next_release = (uint8_t)((index + 1U) % SAI_CONT_RX_NODE_COUNT);
+	irq_unlock(key);
+	return 0;
+}
+
+int stm32_sai_rx_get_stats(const struct device *dev, uint32_t *queue_high_water,
+			   uint32_t *queue_capacity, uint32_t *slab_high_water,
+			   uint32_t *slab_capacity)
+{
+	struct stm32_sai_sub_data *sub_data;
+	struct stream *stream;
+
+	if (dev == NULL || queue_high_water == NULL || queue_capacity == NULL ||
+	    slab_high_water == NULL || slab_capacity == NULL) {
+		return -EINVAL;
+	}
+	sub_data = dev->data;
+	stream = &sub_data->stream;
+	if (!stream->continuous_rx) {
+		return -ENOTSUP;
+	}
+	*queue_high_water = (uint32_t)atomic_get(&stream->continuous_queue_high_water);
+	*queue_capacity = ARRAY_SIZE(sub_data->queue_buffer);
+	*slab_high_water = stream->continuous_slab_high_water;
+	*slab_capacity = SAI_CONT_RX_NODE_COUNT;
+	return 0;
+}
+#endif
 
 static int stm32_sai_sub_trigger(const struct device *dev, enum i2s_dir dir,
 				 enum i2s_trigger_cmd cmd)
@@ -906,6 +1408,18 @@ static int stm32_sai_sub_trigger(const struct device *dev, enum i2s_dir dir,
 			irq_unlock(key);
 			return -EIO;
 		}
+#if defined(CONFIG_I2S_STM32_SAI_CONTINUOUS_RX_N6)
+		if (stream->continuous_rx && !stream->continuous_quiesced &&
+		    stream->continuous_blocks[0] != NULL) {
+			stream->state = I2S_STATE_STOPPING;
+			irq_unlock(key);
+			ret = continuous_rx_quiesce(dev);
+			if (ret != 0) {
+				return ret;
+			}
+			key = irq_lock();
+		}
+#endif
 
 		stream->queue_drop(dev);
 		stream->state = I2S_STATE_READY;
@@ -921,6 +1435,18 @@ static int stm32_sai_sub_trigger(const struct device *dev, enum i2s_dir dir,
 			irq_unlock(key);
 			return -EIO;
 		}
+#if defined(CONFIG_I2S_STM32_SAI_CONTINUOUS_RX_N6)
+		if (stream->continuous_rx && !stream->continuous_quiesced &&
+		    stream->continuous_blocks[0] != NULL) {
+			stream->state = I2S_STATE_STOPPING;
+			irq_unlock(key);
+			ret = continuous_rx_quiesce(dev);
+			if (ret != 0) {
+				return ret;
+			}
+			key = irq_lock();
+		}
+#endif
 		stream->queue_drop(dev);
 		stream->state = I2S_STATE_READY;
 
@@ -1000,6 +1526,7 @@ static DEVICE_API(i2s, i2s_stm32_sai_api) = {
 
 #define SAI_SUB_INIT(node)                                                                         \
 	PINCTRL_DT_DEFINE(node);                                                                   \
+	SAI_CONT_NODE_STORAGE_DECL(node)                                                            \
                                                                                                    \
 	static struct stm32_sai_sub_data sub_data_##node = {                                       \
 		.hsai = {                                                                          \
@@ -1013,6 +1540,7 @@ static DEVICE_API(i2s, i2s_stm32_sai_api) = {
 		COND_CODE_1(DT_DMAS_HAS_NAME(node, tx),                                            \
 		    (SAI_SUB_DMA_CHANNEL_INIT(node, MEMORY, PERIPHERAL)),                          \
 		    (SAI_SUB_DMA_CHANNEL_INIT(node, PERIPHERAL, MEMORY))),                         \
+		SAI_CONT_NODE_STORAGE_INIT(node)                                                   \
 	};                                                                                         \
                                                                                                    \
 	static const struct stm32_sai_sub_cfg sub_cfg_##node = {                                   \

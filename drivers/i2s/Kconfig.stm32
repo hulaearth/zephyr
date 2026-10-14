@@ -45,4 +45,13 @@ config I2S_STM32_SAI_BLOCK_COUNT
 	int "SAI queue length"
 	default 4
 
+config I2S_STM32_SAI_CONTINUOUS_RX_N6
+	bool "STM32N6 continuous linked-list SAI receive"
+	depends on SOC_SERIES_STM32N6X
+	default n
+	depends on I2S_STM32_SAI_BLOCK_COUNT >= 8
+	help
+	  Use a finite GPDMA linked-list for continuous SAI receive on STM32N6.
+	  The application must release each buffer with stm32_sai_rx_release().
+
 endif # I2S_STM32_SAI
