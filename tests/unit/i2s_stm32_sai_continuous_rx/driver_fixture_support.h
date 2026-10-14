@@ -46,6 +46,8 @@
 #define DMA_IT_TO BIT(5)
 #define DMA_IT_SUSP BIT(6)
 #define DMA_CCR_EN BIT(0)
+#define DMA_CCR_SUSP BIT(1)
+#define DMA_CCR_RESET BIT(2)
 #define DMA_CSR_IDLEF BIT(0)
 #define DMA_CLLR_LA 0xffffffc0U
 #define DMA_CLBAR_LBA 0xfffffe00U
@@ -93,6 +95,7 @@
 #define LOG_DBG(...) do { } while (false)
 #define __HAL_DMA_GET_FLAG(hdma, mask) ((hdma)->flags & (mask))
 #define __HAL_DMA_CLEAR_FLAG(hdma, mask) ((hdma)->flags &= ~(mask))
+#define __HAL_DMA_DISABLE(hdma) ((hdma)->Instance->CCR |= (DMA_CCR_SUSP | DMA_CCR_RESET))
 #define __HAL_DMA_DISABLE_IT(hdma, mask) do { ARG_UNUSED(hdma); ARG_UNUSED(mask); } while (false)
 #define __HAL_DMA_ENABLE_IT(hdma, mask) do { ARG_UNUSED(hdma); ARG_UNUSED(mask); } while (false)
 #define __HAL_SAI_CLEAR_FLAG(hsai, mask) do { ARG_UNUSED(hsai); ARG_UNUSED(mask); } while (false)

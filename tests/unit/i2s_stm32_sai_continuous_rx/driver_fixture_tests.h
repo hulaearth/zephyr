@@ -58,6 +58,27 @@ static void fixture_callback(uint32_t flags, uintptr_t current)
 	dma_callback(NULL, &fixture_data.hdma, 0U, 0);
 }
 
+static void fixture_complete_dma_stop(void)
+{
+	fixture_dma_registers.CCR &= ~DMA_CCR_EN;
+	fixture_dma_registers.CSR |= DMA_CSR_IDLEF;
+}
+
+static void fixture_drop_and_restart_reversed(void)
+{
+	void *initial_blocks[SAI_CONT_RX_NODE_COUNT];
+
+	for (uint8_t i = 0U; i < SAI_CONT_RX_NODE_COUNT; i++) {
+		initial_blocks[i] = fixture_data.stream.continuous_blocks[i];
+	}
+	zassert_ok(stm32_sai_sub_trigger(&fixture_device, I2S_DIR_RX, I2S_TRIGGER_DROP));
+	zassert_ok(stm32_sai_sub_trigger(&fixture_device, I2S_DIR_RX, I2S_TRIGGER_START));
+	for (uint8_t i = 0U; i < SAI_CONT_RX_NODE_COUNT; i++) {
+		zassert_equal(initial_blocks[SAI_CONT_RX_NODE_COUNT - i - 1U],
+			      fixture_data.stream.continuous_blocks[i]);
+	}
+}
+
 static void fixture_cleanup(void)
 {
 	for (uint8_t i = 0U; i < SAI_CONT_RX_NODE_COUNT; i++) {
@@ -84,7 +105,9 @@ ZTEST(i2s_stm32_sai_continuous_rx, test_delayed_tc_stop_publishes_prefix_and_res
 	zassert_equal(I2S_STATE_READY, fixture_data.stream.state);
 	zassert_false(fixture_data.stream.continuous_stop_pending);
 	zassert_true(fixture_data.stream.continuous_stopped);
-	zassert_false((fixture_dma_registers.CCR & DMA_CCR_EN) != 0U);
+	zassert_true((fixture_dma_registers.CCR & DMA_CCR_EN) != 0U);
+	zassert_equal(DMA_CCR_SUSP | DMA_CCR_RESET,
+		      fixture_dma_registers.CCR & (DMA_CCR_SUSP | DMA_CCR_RESET));
 	zassert_equal(2U, k_msgq_num_used_get(&fixture_data.stream.queue));
 	zassert_equal(SAI_CONT_RX_NODE_QUEUED, fixture_data.stream.continuous_node_state[0]);
 	zassert_equal(SAI_CONT_RX_NODE_QUEUED, fixture_data.stream.continuous_node_state[1]);
@@ -96,7 +119,7 @@ ZTEST(i2s_stm32_sai_continuous_rx, test_delayed_tc_stop_publishes_prefix_and_res
 	zassert_ok(stm32_sai_sub_read(&fixture_device, &second, &size));
 	zassert_equal(fixture_data.stream.continuous_blocks[1], second);
 
-	fixture_dma_registers.CSR |= DMA_CSR_IDLEF;
+	fixture_complete_dma_stop();
 	zassert_equal(-EBUSY,
 		      stm32_sai_sub_trigger(&fixture_device, I2S_DIR_RX, I2S_TRIGGER_START));
 	zassert_equal(I2S_STATE_READY, fixture_data.stream.state);
@@ -143,41 +166,102 @@ ZTEST(i2s_stm32_sai_continuous_rx, test_stop_remembers_target_published_by_half_
 			 (uintptr_t)fixture_data.stream.continuous_blocks[2] + 4U);
 	zassert_equal(I2S_STATE_READY, fixture_data.stream.state);
 	zassert_equal(2U, k_msgq_num_used_get(&fixture_data.stream.queue));
+	zassert_true((fixture_dma_registers.CCR & DMA_CCR_EN) != 0U);
+	zassert_equal(DMA_CCR_SUSP | DMA_CCR_RESET,
+		      fixture_dma_registers.CCR & (DMA_CCR_SUSP | DMA_CCR_RESET));
 	fixture_cleanup();
 }
 
-ZTEST(i2s_stm32_sai_continuous_rx, test_stop_terminal_tail_publishes_completed_ring)
+static void fixture_publish_prior_tail_blocks_and_request_stop(void **borrowed)
 {
-	fixture_init();
-	fixture_dma_registers.CDAR = (uintptr_t)fixture_data.stream.continuous_blocks[7] + 8U;
+	size_t size;
+	uintptr_t tail_end = (uintptr_t)fixture_data.stream.continuous_blocks[7] + 16U;
+
+	fixture_callback(DMA_FLAG_HT,
+			 (uintptr_t)fixture_data.stream.continuous_blocks[7] + 4U);
+	zassert_equal(7U, k_msgq_num_used_get(&fixture_data.stream.queue));
+	zassert_ok(stm32_sai_sub_read(&fixture_device, borrowed, &size));
+	zassert_equal(fixture_data.stream.continuous_blocks[0], *borrowed);
+	fixture_dma_registers.CDAR = tail_end;
 	zassert_ok(stm32_sai_sub_trigger(&fixture_device, I2S_DIR_RX, I2S_TRIGGER_STOP));
-	fixture_dma_registers.CCR &= ~DMA_CCR_EN;
-	fixture_dma_registers.CSR |= DMA_CSR_IDLEF;
-	fixture_callback(DMA_FLAG_TC,
-			 (uintptr_t)fixture_data.stream.continuous_blocks[7] + 16U);
-	zassert_equal(I2S_STATE_READY, fixture_data.stream.state);
-	zassert_equal(SAI_CONT_RX_NODE_COUNT, k_msgq_num_used_get(&fixture_data.stream.queue));
-	zassert_equal(SAI_CONT_RX_NODE_QUEUED, fixture_data.stream.continuous_node_state[7]);
-	fixture_cleanup();
+	zassert_equal(7U, fixture_data.stream.continuous_stop_target);
+	zassert_false(fixture_data.stream.continuous_stop_target_complete);
 }
 
-ZTEST(i2s_stm32_sai_continuous_rx, test_tail_address_alias_does_not_publish_active_block)
+ZTEST(i2s_stm32_sai_continuous_rx, test_stop_alias_fails_safe_without_terminal_proof)
 {
-	void *saved_block0;
+	void *borrowed;
 	uintptr_t tail_end;
 
 	fixture_init();
-	fixture_dma_registers.CDAR = (uintptr_t)fixture_data.stream.continuous_blocks[0] + 8U;
-	zassert_ok(stm32_sai_sub_trigger(&fixture_device, I2S_DIR_RX, I2S_TRIGGER_STOP));
-	saved_block0 = fixture_data.stream.continuous_blocks[0];
+	fixture_drop_and_restart_reversed();
 	tail_end = (uintptr_t)fixture_data.stream.continuous_blocks[7] + 16U;
-	fixture_data.stream.continuous_blocks[0] = (void *)tail_end;
+	fixture_publish_prior_tail_blocks_and_request_stop(&borrowed);
+	zassert_equal((uintptr_t)fixture_data.stream.continuous_blocks[6], tail_end);
+	zassert_equal(SAI_CONT_RX_NODE_BORROWED,
+		      fixture_data.stream.continuous_node_state[0]);
+
+	/* EN remains set, so CDAR alone cannot prove the finite tail completed. */
 	fixture_callback(DMA_FLAG_TC, tail_end);
+	zassert_equal(I2S_STATE_ERROR, fixture_data.stream.state);
+	zassert_true(fixture_data.stream.continuous_fault);
+	zassert_equal(6U, k_msgq_num_used_get(&fixture_data.stream.queue));
+	zassert_equal(SAI_CONT_RX_NODE_BORROWED,
+		      fixture_data.stream.continuous_node_state[0]);
+	zassert_equal(SAI_CONT_RX_NODE_DMA,
+		      fixture_data.stream.continuous_node_state[7]);
+	zassert_equal(DMA_CCR_SUSP | DMA_CCR_RESET,
+		      fixture_dma_registers.CCR & (DMA_CCR_SUSP | DMA_CCR_RESET));
+	zassert_true((fixture_dma_registers.CCR & DMA_CCR_EN) != 0U);
+	zassert_equal(borrowed, fixture_data.stream.continuous_blocks[0]);
+	fixture_cleanup();
+}
+
+ZTEST(i2s_stm32_sai_continuous_rx, test_stop_alias_publishes_only_remaining_tail)
+{
+	void *borrowed;
+	uintptr_t tail_end;
+	uint32_t queue_depth;
+
+	fixture_init();
+	fixture_drop_and_restart_reversed();
+	tail_end = (uintptr_t)fixture_data.stream.continuous_blocks[7] + 16U;
+	fixture_publish_prior_tail_blocks_and_request_stop(&borrowed);
+	zassert_equal((uintptr_t)fixture_data.stream.continuous_blocks[6], tail_end);
+	queue_depth = k_msgq_num_used_get(&fixture_data.stream.queue);
+	fixture_complete_dma_stop();
+	fixture_callback(DMA_FLAG_TC, tail_end);
+	zassert_equal(I2S_STATE_READY, fixture_data.stream.state);
+	zassert_equal(queue_depth + 1U, k_msgq_num_used_get(&fixture_data.stream.queue));
+	zassert_equal(SAI_CONT_RX_NODE_BORROWED,
+		      fixture_data.stream.continuous_node_state[0]);
+	zassert_equal(borrowed, fixture_data.stream.continuous_blocks[0]);
+	zassert_equal(SAI_CONT_RX_NODE_QUEUED, fixture_data.stream.continuous_node_state[7]);
+	zassert_equal(0U, fixture_data.stream.continuous_next_complete);
+	fixture_cleanup();
+}
+
+ZTEST(i2s_stm32_sai_continuous_rx, test_repeated_terminal_callback_with_all_owners)
+{
+	void *borrowed;
+	uintptr_t tail_end;
+
+	fixture_init();
+	fixture_drop_and_restart_reversed();
+	tail_end = (uintptr_t)fixture_data.stream.continuous_blocks[7] + 16U;
+	fixture_publish_prior_tail_blocks_and_request_stop(&borrowed);
+	fixture_complete_dma_stop();
+	fixture_callback(DMA_FLAG_HT, tail_end);
 	zassert_equal(I2S_STATE_STOPPING, fixture_data.stream.state);
 	zassert_true(fixture_data.stream.continuous_stop_pending);
-	zassert_equal(0U, k_msgq_num_used_get(&fixture_data.stream.queue));
-	zassert_equal(SAI_CONT_RX_NODE_DMA, fixture_data.stream.continuous_node_state[7]);
-	fixture_data.stream.continuous_blocks[0] = saved_block0;
+	zassert_equal(7U, k_msgq_num_used_get(&fixture_data.stream.queue));
+	zassert_equal(SAI_CONT_RX_NODE_QUEUED, fixture_data.stream.continuous_node_state[7]);
+	fixture_callback(DMA_FLAG_TC, tail_end);
+	zassert_equal(I2S_STATE_READY, fixture_data.stream.state);
+	zassert_equal(7U, k_msgq_num_used_get(&fixture_data.stream.queue));
+	zassert_equal(SAI_CONT_RX_NODE_BORROWED,
+		      fixture_data.stream.continuous_node_state[0]);
+	zassert_equal(borrowed, fixture_data.stream.continuous_blocks[0]);
 	fixture_cleanup();
 }
 
