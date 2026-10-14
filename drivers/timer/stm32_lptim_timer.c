@@ -741,7 +741,7 @@ void sys_clock_idle_exit(void)
 		stdby_timer_us = counter_ticks_to_us(stdby_timer, stdby_timer_diff);
 
 		/* Convert standby time in LPTIM cnt */
-		missed_lptim_cnt = ((uint64_t)CONFIG_STM32_LPTIM_CLOCK * stdby_timer_us) /
+		missed_lptim_cnt = ((uint64_t)lptim_clock_freq * stdby_timer_us) /
 				   USEC_PER_SEC;
 		/* Add the LPTIM cnt pre standby */
 		missed_lptim_cnt += lptim_cnt_pre_stdby;
