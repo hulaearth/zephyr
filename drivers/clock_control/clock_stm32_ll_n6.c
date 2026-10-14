@@ -120,7 +120,8 @@ static uint32_t get_pllout_frequency(int pll_id)
 
 	__ASSERT_NO_MSG(pllm_div && pllout_div1 && pllout_div2);
 
-	return (pllsrc_freq / pllm_div) * plln_mul / (pllout_div1 * pllout_div2);
+	return ((uint64_t)pllsrc_freq * plln_mul) /
+	       ((uint64_t)pllm_div * pllout_div1 * pllout_div2);
 }
 
 __unused uint32_t get_icout_frequency(uint32_t icsrc, int div)
@@ -141,17 +142,28 @@ __unused uint32_t get_icout_frequency(uint32_t icsrc, int div)
 
 static uint32_t get_sysclk_frequency(void)
 {
-#if defined(STM32_SYSCLK_SRC_HSE)
-	return STM32_HSE_FREQ;
-#elif defined(STM32_SYSCLK_SRC_HSI)
-	return STM32_HSI_FREQ;
-#elif defined(STM32_SYSCLK_SRC_IC2)
-	return get_icout_frequency(LL_RCC_IC2_GetSource(), STM32_IC2_DIV);
-#else
-	__ASSERT(0, "No SYSCLK Source configured");
-	return 0;
+	switch (LL_RCC_GetSysClkSource()) {
+#if defined(STM32_HSE_ENABLED)
+	case LL_RCC_SYS_CLKSOURCE_STATUS_HSE:
+		return STM32_HSE_FREQ;
 #endif
-
+#if defined(STM32_HSI_ENABLED)
+	case LL_RCC_SYS_CLKSOURCE_STATUS_HSI:
+		return STM32_HSI_FREQ /
+		       (1U << (LL_RCC_HSI_GetDivider() >> RCC_HSICFGR_HSIDIV_Pos));
+#endif
+#if defined(STM32_MSI_ENABLED)
+	case LL_RCC_SYS_CLKSOURCE_STATUS_MSI:
+		return get_msi_frequency();
+#endif
+#if defined(STM32_IC2_ENABLED)
+	case LL_RCC_SYS_CLKSOURCE_STATUS_IC2_IC6_IC11:
+		return get_icout_frequency(LL_RCC_IC2_GetSource(), LL_RCC_IC2_GetDivider());
+#endif
+	default:
+		__ASSERT(0, "No SYSCLK Source configured");
+		return 0;
+	}
 }
 
 
@@ -382,7 +394,7 @@ static int stm32_clock_control_get_subsys_rate(const struct device *dev,
 #endif /* STM32_CKPER_ENABLED */
 #if defined(STM32_IC1_ENABLED)
 	case STM32_SRC_IC1:
-		*rate = get_icout_frequency(LL_RCC_IC1_GetSource(), STM32_IC1_DIV);
+		*rate = get_icout_frequency(LL_RCC_IC1_GetSource(), LL_RCC_IC1_GetDivider());
 		break;
 #endif /* STM32_IC1_ENABLED */
 #if defined(STM32_IC2_ENABLED)
@@ -1042,8 +1054,17 @@ int stm32_clock_control_init(const struct device *dev)
 		return -ENOTSUP;
 	}
 
-	/* Update CMSIS variable */
-	SystemCoreClock = CONFIG_SYS_CLOCK_HW_CYCLES_PER_SEC;
+#if !defined(STM32_PLL3_ENABLED)
+	/* All configured consumers now use their selected clock sources. */
+	LL_RCC_PLL3_Disable();
+#endif
+
+#if !defined(STM32_PLL2_ENABLED)
+	LL_RCC_PLL2_Disable();
+#endif
+
+	/* Update the configured CPU clock rate. */
+	SystemCoreClock = DT_PROP(DT_NODELABEL(cpusw), clock_frequency);
 
 	return r;
 }
