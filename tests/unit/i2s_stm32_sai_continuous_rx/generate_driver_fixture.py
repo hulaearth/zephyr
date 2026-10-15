@@ -19,6 +19,7 @@ FUNCTIONS = (
 	("static int stm32_sai_sub_conf", "stm32_sai_sub_conf"),
 	("static int stm32_sai_sub_read", "stm32_sai_sub_read"),
 	("int stm32_sai_rx_release", "stm32_sai_rx_release"),
+	("int stm32_sai_rx_get_evidence", "stm32_sai_rx_get_evidence"),
 	("static int stm32_sai_sub_trigger", "stm32_sai_sub_trigger"),
 )
 

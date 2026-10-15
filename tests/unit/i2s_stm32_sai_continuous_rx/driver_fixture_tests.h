@@ -165,6 +165,46 @@ static void fixture_cleanup(void)
 	}
 }
 
+ZTEST(i2s_stm32_sai_continuous_rx, test_descriptor_evidence_tracks_append_and_completion)
+{
+	struct stm32_sai_rx_evidence evidence;
+	void *first;
+	void *second;
+	size_t size;
+
+	fixture_init();
+	zassert_equal(-EINVAL, stm32_sai_rx_get_evidence(NULL, &evidence));
+	zassert_equal(-EINVAL, stm32_sai_rx_get_evidence(&fixture_device, NULL));
+	fixture_data.stream.continuous_rx = false;
+	zassert_equal(-ENOTSUP, stm32_sai_rx_get_evidence(&fixture_device, &evidence));
+	fixture_data.stream.continuous_rx = true;
+	fixture_callback(DMA_FLAG_TC, (uintptr_t)fixture_data.stream.continuous_blocks[2] + 4U);
+	zassert_ok(stm32_sai_sub_read(&fixture_device, &first, &size));
+	zassert_ok(stm32_sai_sub_read(&fixture_device, &second, &size));
+	zassert_ok(stm32_sai_rx_release(&fixture_device, first));
+	zassert_ok(stm32_sai_rx_release(&fixture_device, second));
+	fixture_callback(DMA_FLAG_TC, (uintptr_t)fixture_data.stream.continuous_blocks[0] + 4U);
+	fixture_callback(DMA_FLAG_TC, (uintptr_t)fixture_data.stream.continuous_blocks[1] + 4U);
+	zassert_ok(stm32_sai_rx_get_evidence(&fixture_device, &evidence));
+	zassert_equal(2U, evidence.append_count);
+	zassert_equal(0U, evidence.append_readback_failures);
+	zassert_equal(1U, evidence.appended_completions);
+	zassert_equal(9U, evidence.completion_count);
+	zassert_equal(3U, evidence.completion_callbacks);
+	zassert_equal(2U, evidence.coalesced_callbacks);
+	zassert_ok(stm32_sai_sub_trigger(&fixture_device, I2S_DIR_RX, I2S_TRIGGER_DROP));
+	zassert_ok(stm32_sai_rx_get_evidence(&fixture_device, &evidence));
+	zassert_equal(9U, evidence.completion_count);
+	zassert_equal(2U, evidence.append_count);
+	zassert_ok(stm32_sai_sub_trigger(&fixture_device, I2S_DIR_RX, I2S_TRIGGER_START));
+	zassert_ok(stm32_sai_rx_get_evidence(&fixture_device, &evidence));
+	zassert_equal(0U, evidence.completion_count);
+	zassert_equal(0U, evidence.append_count);
+	zassert_equal(0U, evidence.completion_callbacks);
+	zassert_equal(0U, evidence.max_callback_gap_cycles);
+	fixture_cleanup();
+}
+
 ZTEST(i2s_stm32_sai_continuous_rx, test_delayed_tc_stop_publishes_prefix_and_restarts_safely)
 {
 	void *first;

@@ -22,6 +22,10 @@ do not rely on this digest or on training data alone.
   put "Generated with ...", session links or any other mention of AI tools in commit messages,
   PR bodies, issues or comments. The `Assisted-by:` trailer below is the only place AI
   involvement is recorded.
+- Hula fork exception: after the responsible human explicitly confirms review and authorizes
+  the DCO sign-off for the current task, an agent may run `git commit -s` with that human's
+  configured identity. Record the approval in task scratch. This does not authorize an
+  upstream Zephyr submission.
 - Add exactly one `Assisted-by: <Agent>:<model-version> [tool ...]` trailer, for example
   `Assisted-by: Claude:claude-opus-4.6 coccinelle`, naming the tool actually used. Replace it
   rather than stacking when a different model amends the commit. `checkpatch.pl` validates the
