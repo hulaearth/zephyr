@@ -14,6 +14,7 @@
 #include <string.h>
 
 #include <zephyr/drivers/i2s.h>
+#include <zephyr/drivers/i2s/stm32_sai.h>
 #include <zephyr/drivers/dma.h>
 #include <zephyr/device.h>
 #include <zephyr/sys/atomic.h>
@@ -288,6 +289,16 @@ struct stream {
 	uint8_t continuous_next_release;
 	atomic_t continuous_queue_high_water;
 	uint32_t continuous_slab_high_water;
+	uint32_t continuous_append_count;
+	uint32_t continuous_append_readback_failures;
+	uint32_t continuous_appended_completions;
+	uint32_t continuous_completion_count;
+	uint32_t continuous_appended_mask;
+	uint32_t continuous_completion_callbacks;
+	uint32_t continuous_coalesced_callbacks;
+	uint32_t continuous_max_callback_gap_cycles;
+	uint32_t continuous_last_callback_cycle;
+	bool continuous_callback_cycle_valid;
 };
 
 struct stm32_sai_sub_data {

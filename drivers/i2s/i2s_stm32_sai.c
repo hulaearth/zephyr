@@ -114,6 +114,16 @@ struct stream {
 	uint8_t continuous_next_release;
 	atomic_t continuous_queue_high_water;
 	uint32_t continuous_slab_high_water;
+	uint32_t continuous_append_count;
+	uint32_t continuous_append_readback_failures;
+	uint32_t continuous_appended_completions;
+	uint32_t continuous_completion_count;
+	uint32_t continuous_appended_mask;
+	uint32_t continuous_completion_callbacks;
+	uint32_t continuous_coalesced_callbacks;
+	uint32_t continuous_max_callback_gap_cycles;
+	uint32_t continuous_last_callback_cycle;
+	bool continuous_callback_cycle_valid;
 #endif
 };
 
@@ -607,6 +617,21 @@ static void dma_callback(const struct device *dma_dev, void *arg, uint32_t chann
 			sub_data->hsai.Instance->CR1 &= ~(SAI_xCR1_DMAEN | SAI_xCR1_SAIEN);
 			return;
 		}
+		uint32_t callback_cycle = k_cycle_get_32();
+
+		if (stream->continuous_callback_cycle_valid) {
+			uint32_t gap = callback_cycle - stream->continuous_last_callback_cycle;
+
+			if (gap > stream->continuous_max_callback_gap_cycles) {
+				stream->continuous_max_callback_gap_cycles = gap;
+			}
+		}
+		stream->continuous_last_callback_cycle = callback_cycle;
+		stream->continuous_callback_cycle_valid = true;
+		stream->continuous_completion_callbacks++;
+		if (publish_count > 1U) {
+			stream->continuous_coalesced_callbacks++;
+		}
 		for (uint8_t completed = 0U; completed < publish_count; completed++) {
 			uint8_t i = stream->continuous_next_complete;
 			struct queue_item item = {
@@ -620,6 +645,11 @@ static void dma_callback(const struct device *dma_dev, void *arg, uint32_t chann
 				return;
 			}
 			stream->continuous_node_state[i] = SAI_CONT_RX_NODE_QUEUED;
+			stream->continuous_completion_count++;
+			if ((stream->continuous_appended_mask & BIT(i)) != 0U) {
+				stream->continuous_appended_completions++;
+				stream->continuous_appended_mask &= ~BIT(i);
+			}
 			stream->continuous_next_complete = (uint8_t)((i + 1U) % SAI_CONT_RX_NODE_COUNT);
 			uint32_t queue_depth = k_msgq_num_used_get(&stream->queue);
 			if (queue_depth > (uint32_t)atomic_get(&stream->continuous_queue_high_water)) {
@@ -1110,6 +1140,19 @@ static int continuous_rx_start(const struct device *dev)
 	stream->continuous_next_release = 0U;
 	atomic_set(&stream->continuous_queue_high_water, 0);
 	stream->continuous_slab_high_water = 0U;
+	unsigned int key = irq_lock();
+
+	stream->continuous_append_count = 0U;
+	stream->continuous_append_readback_failures = 0U;
+	stream->continuous_appended_completions = 0U;
+	stream->continuous_completion_count = 0U;
+	stream->continuous_appended_mask = 0U;
+	stream->continuous_completion_callbacks = 0U;
+	stream->continuous_coalesced_callbacks = 0U;
+	stream->continuous_max_callback_gap_cycles = 0U;
+	stream->continuous_last_callback_cycle = 0U;
+	stream->continuous_callback_cycle_valid = false;
+	irq_unlock(key);
 	stream->continuous_fault = false;
 	stream->continuous_quiesced = false;
 	stream->continuous_stop_pending = false;
@@ -1458,6 +1501,12 @@ int stm32_sai_rx_release(const struct device *dev, void *buffer)
 		((uint32_t)stream->continuous_nodes[index] & DMA_CLLR_LA) |
 		stream->continuous_link_mask;
 	__DSB();
+	stream->continuous_append_count++;
+	if (*(volatile uint32_t *)&stream->continuous_tail->LinkRegisters[5] !=
+	    (((uint32_t)stream->continuous_nodes[index] & DMA_CLLR_LA) |
+	     stream->continuous_link_mask)) {
+		stream->continuous_append_readback_failures++;
+	}
 	if ((sub_data->hdma.Instance->CCR & DMA_CCR_EN) == 0U) {
 		stream->continuous_tail->LinkRegisters[5] = 0U;
 		__DSB();
@@ -1468,8 +1517,37 @@ int stm32_sai_rx_release(const struct device *dev, void *buffer)
 		return -EIO;
 	}
 	stream->continuous_tail = stream->continuous_nodes[index];
+	stream->continuous_appended_mask |= BIT(index);
 	stream->continuous_node_state[index] = SAI_CONT_RX_NODE_DMA;
 	stream->continuous_next_release = (uint8_t)((index + 1U) % SAI_CONT_RX_NODE_COUNT);
+	irq_unlock(key);
+	return 0;
+}
+
+int stm32_sai_rx_get_evidence(const struct device *dev, struct stm32_sai_rx_evidence *evidence)
+{
+	struct stm32_sai_sub_data *sub_data;
+	struct stream *stream;
+	unsigned int key;
+
+	if (dev == NULL || evidence == NULL) {
+		return -EINVAL;
+	}
+	sub_data = dev->data;
+	stream = &sub_data->stream;
+	if (!stream->continuous_rx) {
+		return -ENOTSUP;
+	}
+	key = irq_lock();
+	*evidence = (struct stm32_sai_rx_evidence){
+		.append_count = stream->continuous_append_count,
+		.append_readback_failures = stream->continuous_append_readback_failures,
+		.appended_completions = stream->continuous_appended_completions,
+		.completion_count = stream->continuous_completion_count,
+		.completion_callbacks = stream->continuous_completion_callbacks,
+		.coalesced_callbacks = stream->continuous_coalesced_callbacks,
+		.max_callback_gap_cycles = stream->continuous_max_callback_gap_cycles,
+	};
 	irq_unlock(key);
 	return 0;
 }

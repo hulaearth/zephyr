@@ -39,6 +39,32 @@ int stm32_sai_rx_get_stats(const struct device *dev, uint32_t *queue_high_water,
 			   uint32_t *queue_capacity, uint32_t *slab_high_water,
 			   uint32_t *slab_capacity);
 
+/** @brief Software descriptor progress since the last continuous RX start. */
+struct stm32_sai_rx_evidence {
+	uint32_t append_count; /**< Descriptor link writes attempted. */
+	uint32_t append_readback_failures; /**< Link writes with a mismatched readback. */
+	uint32_t appended_completions; /**< Completed descriptors appended after start. */
+	uint32_t completion_count; /**< Completed descriptors queued for the caller. */
+	uint32_t completion_callbacks; /**< DMA callbacks that publish descriptors. */
+	uint32_t coalesced_callbacks; /**< Callbacks that publish multiple descriptors. */
+	uint32_t max_callback_gap_cycles; /**< Largest gap in Zephyr cycle-clock units. */
+};
+
+/**
+ * @brief Snapshot software descriptor progress without changing buffer ownership.
+ *
+ * Counters wrap modulo 2^32 and survive stop. They reset on the next start.
+ * These counters do not prove sample continuity or a hard timing bound.
+ *
+ * @param dev SAI device. Must not be NULL.
+ * @param evidence Caller-owned snapshot destination. Must not be NULL.
+ *
+ * @retval 0 Snapshot returned.
+ * @retval -EINVAL At least one pointer is null.
+ * @retval -ENOTSUP Continuous receive is not configured.
+ */
+int stm32_sai_rx_get_evidence(const struct device *dev, struct stm32_sai_rx_evidence *evidence);
+
 #ifdef __cplusplus
 }
 #endif
