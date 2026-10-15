@@ -606,7 +606,7 @@ static int scd4x_sample_fetch(const struct device *dev, enum sensor_channel chan
 			return ret;
 		}
 		if (!is_data_ready) {
-			return 0;
+			return -EAGAIN;
 		}
 	}
 

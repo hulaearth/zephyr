@@ -67,12 +67,12 @@ static const struct reset_dt_spec lptim_reset = RESET_DT_SPEC_GET(LPTIM_SYSTIMER
  * - when timeout irq occurs the counter is already reset
  * - the maximum timeout duration is reached with the lptim_time_base value
  * - with prescaler of 1, the max timeout (LPTIM_TIMEBASE) is 2 seconds:
- *    0xFFFF / (LSE freq (32768Hz) / 1)
+ *    0x10000 / (LSE freq (32768Hz) / 1)
  * - with prescaler of 128, the max timeout (LPTIM_TIMEBASE) is 256 seconds:
- *    0xFFFF / (LSE freq (32768Hz) / 128)
+ *    0x10000 / (LSE freq (32768Hz) / 128)
  */
 
-static int32_t lptim_time_base;
+static uint32_t lptim_time_base;
 static uint32_t lptim_clock_freq = CONFIG_STM32_LPTIM_CLOCK;
 /* The prescaler given by the DTS and to apply to the lptim_clock_freq */
 static uint32_t lptim_clock_presc = DT_PROP(LPTIM_SYSTIMER_NODE, st_prescaler);
@@ -80,10 +80,7 @@ static uint32_t lptim_clock_presc = DT_PROP(LPTIM_SYSTIMER_NODE, st_prescaler);
 /* Minimum nb of clock cycles to have to set autoreload register correctly */
 #define LPTIM_GUARD_VALUE 2
 
-/* A 32bit value cannot exceed 0xFFFFFFFF/LPTIM_TIMEBASE counting cycles.
- * This is for example about of 65000 x 2000ms when clocked by LSI
- */
-static uint32_t accumulated_lptim_cnt;
+static uint64_t accumulated_lptim_cnt;
 /* Next autoreload value to set */
 static uint32_t autoreload_next;
 /* Indicate if the autoreload register is ready for a write */
@@ -93,7 +90,7 @@ static struct k_spinlock lock;
 
 #ifdef CONFIG_STM32_LPTIM_STDBY_TIMER
 
-#define cycle_t uint32_t
+#define cycle_t uint64_t
 
 /* This local variable indicates that the timeout was set right before
  * entering standby state.
@@ -450,7 +447,7 @@ void sys_clock_set_timeout(uint32_t ticks, bool idle)
 		next_arr = lp_time + LPTIM_GUARD_VALUE;
 	}
 	/* with slow lptim_clock_freq, LPTIM_GUARD_VALUE of 1 is enough */
-	next_arr = next_arr - 1;
+	next_arr = next_arr - 1U;
 
 	/* Update autoreload register */
 	lptim_set_autoreload(next_arr);
@@ -502,21 +499,27 @@ uint32_t sys_clock_elapsed(void)
 
 uint32_t sys_clock_cycle_get_32(void)
 {
-	/* just gives the accumulated count in a number of hw cycles */
+	return (uint32_t)sys_clock_cycle_get_64();
+}
+
+uint64_t sys_clock_cycle_get_64(void)
+{
+	uint64_t lp_time;
+	uint32_t hw_cycles_per_sec;
+	uint64_t ret;
 
 	k_spinlock_key_t key = k_spin_lock(&lock);
 
-	uint32_t lp_time = sys_clock_lp_time_get();
+	lp_time = accumulated_lptim_cnt + sys_clock_lp_time_get();
+	hw_cycles_per_sec = sys_clock_hw_cycles_per_sec();
 
-	lp_time += accumulated_lptim_cnt;
-
-	/* convert lptim count in a nb of hw cycles with precision */
-	uint64_t ret = ((uint64_t)lp_time * sys_clock_hw_cycles_per_sec()) / lptim_clock_freq;
+	/* Scale quotient and remainder separately to avoid a wide intermediate product. */
+	ret = (lp_time / lptim_clock_freq) * hw_cycles_per_sec;
+	ret += ((lp_time % lptim_clock_freq) * hw_cycles_per_sec) / lptim_clock_freq;
 
 	k_spin_unlock(&lock, key);
 
-	/* convert in hw cycles (keeping 32bit value) */
-	return (uint32_t)(ret);
+	return ret;
 }
 
 /* Wait for the IER register to be ready, after any bit write operation */
@@ -579,7 +582,7 @@ static int sys_clock_driver_init(void)
 #if DT_NODE_HAS_PROP(LPTIM_SYSTIMER_NODE, st_timeout)
 	uint32_t timeout = DT_PROP(LPTIM_SYSTIMER_NODE, st_timeout);
 
-	if (timeout > (lptim_clock_presc * 0xFFFF) / lptim_clock_freq) {
+	if (timeout > (lptim_clock_presc * 0x10000) / lptim_clock_freq) {
 		__ASSERT(0,
 			"st,timeout can't be higher than range defined by LPTIM presc and freq");
 		return -EIO;
@@ -593,10 +596,8 @@ static int sys_clock_driver_init(void)
 	lptim_time_base = (lptim_clock_freq * timeout) / lptim_clock_presc;
 #else
 	/* Set LPTIM time base based on clock source freq */
-	if (lptim_clock_freq == KHZ(32)) {
-		lptim_time_base = 0xF9FF;
-	} else if (lptim_clock_freq == 32768) {
-		lptim_time_base = 0xFFFF;
+	if ((lptim_clock_freq == KHZ(32)) || (lptim_clock_freq == 32768)) {
+		lptim_time_base = CONFIG_STM32_LPTIM_TIMEBASE;
 	} else {
 		return -EIO;
 	}
@@ -648,6 +649,9 @@ static int sys_clock_driver_init(void)
 	LL_LPTIM_DisableTimeout(LPTIM);
 	/* counting start is initiated by software */
 	LL_LPTIM_TrigSw(LPTIM);
+#if defined(LL_LPTIM_ISR_DIEROK)
+	LL_LPTIM_ClearFlag_DIEROK(LPTIM);
+#endif
 
 #if DT_HAS_COMPAT_STATUS_OKAY(st_stm32u5_lptim)
 	/* Enable the LPTIM before proceeding with configuration */
@@ -682,7 +686,7 @@ static int sys_clock_driver_init(void)
 	/* Set the Autoreload value once the timer is enabled */
 	if (IS_ENABLED(CONFIG_TICKLESS_KERNEL)) {
 		/* LPTIM is triggered on a LPTIM_TIMEBASE period */
-		lptim_set_autoreload(lptim_time_base);
+		lptim_set_autoreload(lptim_time_base - 1U);
 	} else {
 		/* nb of LPTIM counter unit per kernel tick (depends on lptim clock prescaler) */
 		count_per_tick = (lptim_clock_freq / CONFIG_SYS_CLOCK_TICKS_PER_SEC);
@@ -737,13 +741,15 @@ void sys_clock_idle_exit(void)
 		stdby_timer_us = counter_ticks_to_us(stdby_timer, stdby_timer_diff);
 
 		/* Convert standby time in LPTIM cnt */
-		missed_lptim_cnt = (CONFIG_STM32_LPTIM_CLOCK * stdby_timer_us) /
+		missed_lptim_cnt = ((uint64_t)lptim_clock_freq * stdby_timer_us) /
 				   USEC_PER_SEC;
 		/* Add the LPTIM cnt pre standby */
 		missed_lptim_cnt += lptim_cnt_pre_stdby;
 
 		/* Update the cycle counter to include the cycles missed in standby */
+		k_spinlock_key_t key = k_spin_lock(&lock);
 		accumulated_lptim_cnt += missed_lptim_cnt;
+		k_spin_unlock(&lock, key);
 
 		/* Announce the passed ticks to the kernel */
 		dticks = (missed_lptim_cnt * CONFIG_SYS_CLOCK_TICKS_PER_SEC)

@@ -1895,6 +1895,168 @@ ZTEST(net_socket_tls, test_poll_dtls_second_record_in_datagram)
 	k_msleep(10);
 }
 
+ZTEST(net_socket_tls, test_poll_tls_empty_records_and_zero_length_bio)
+{
+	mbedtls_ssl_context *ssl;
+	mbedtls_ssl_recv_t *bio_recv;
+	struct zsock_pollfd fds[1];
+	void *p_bio;
+	uint8_t byte = 'A';
+	int ret;
+
+	test_prepare_tls_connection(NET_AF_INET6);
+
+	ssl = ztls_get_mbedtls_ssl_context(new_sock);
+	zassert_not_null(ssl, "No Mbed TLS context for the server socket");
+	bio_recv = ssl->MBEDTLS_PRIVATE(f_recv);
+	p_bio = ssl->MBEDTLS_PRIVATE(p_bio);
+
+	/* A zero-length BIO read must not be treated as transport EOF. */
+	ret = bio_recv(p_bio, &byte, 0);
+	zassert_equal(ret, 0, "Zero-length BIO read failed");
+
+	ssl = ztls_get_mbedtls_ssl_context(c_sock);
+	zassert_not_null(ssl, "No Mbed TLS context for the client socket");
+	ret = mbedtls_ssl_write(ssl, &byte, 0);
+	zassert_equal(ret, 0, "Cannot write the first empty TLS record");
+	ret = mbedtls_ssl_write(ssl, &byte, 0);
+	zassert_equal(ret, 0, "Cannot write the second empty TLS record");
+
+	fds[0].fd = new_sock;
+	fds[0].events = ZSOCK_POLLIN;
+	ret = zsock_poll(fds, 1, 100);
+	zassert_equal(ret, 0, "Empty TLS records raised a poll event");
+
+	test_send(c_sock, &byte, sizeof(byte), 0);
+	ret = zsock_poll(fds, 1, 100);
+	zassert_equal(ret, 1, "poll() did not report application data");
+	zassert_true(fds[0].revents & ZSOCK_POLLIN, "No POLLIN event");
+
+	ret = zsock_recv(new_sock, &byte, sizeof(byte), ZSOCK_MSG_DONTWAIT);
+	zassert_equal(ret, sizeof(byte), "Cannot read application data");
+	zassert_equal(byte, 'A', "Wrong application data");
+
+	test_sockets_close();
+	k_sleep(TCP_TEARDOWN_TIMEOUT);
+}
+
+ZTEST(net_socket_tls, test_poll_tls_incomplete_record)
+{
+	mbedtls_ssl_context *ssl;
+	mbedtls_ssl_send_t *orig_send;
+	mbedtls_ssl_recv_t *orig_recv;
+	struct zsock_pollfd fds[1];
+	void *p_bio;
+	uint8_t byte = 'A';
+	int ret;
+
+	test_prepare_tls_connection(NET_AF_INET6);
+
+	ssl = ztls_get_mbedtls_ssl_context(c_sock);
+	zassert_not_null(ssl, "No Mbed TLS context for the client socket");
+	orig_send = ssl->MBEDTLS_PRIVATE(f_send);
+	orig_recv = ssl->MBEDTLS_PRIVATE(f_recv);
+	p_bio = ssl->MBEDTLS_PRIVATE(p_bio);
+
+	/* Capture one complete record, then deliver it in two parts. */
+	coalesce_len = 0;
+	mbedtls_ssl_set_bio(ssl, p_bio, coalesce_send, orig_recv, NULL);
+	ret = mbedtls_ssl_write(ssl, &byte, sizeof(byte));
+	zassert_equal(ret, sizeof(byte), "Cannot capture TLS application record");
+	mbedtls_ssl_set_bio(ssl, p_bio, orig_send, orig_recv, NULL);
+	zassert_true(coalesce_len > 1, "Captured TLS record is too short");
+
+	ret = orig_send(p_bio, coalesce_buf, 1);
+	zassert_equal(ret, 1, "Cannot send partial TLS record");
+	fds[0].fd = new_sock;
+	fds[0].events = ZSOCK_POLLIN;
+	ret = zsock_poll(fds, 1, 100);
+	zassert_equal(ret, 0, "Incomplete TLS record raised a poll event");
+
+	ret = orig_send(p_bio, coalesce_buf + 1, coalesce_len - 1);
+	zassert_equal(ret, coalesce_len - 1, "Cannot send remaining TLS record");
+	ret = zsock_poll(fds, 1, 100);
+	zassert_equal(ret, 1, "poll() did not report completed TLS record");
+	zassert_true(fds[0].revents & ZSOCK_POLLIN, "No POLLIN event");
+
+	ret = zsock_recv(new_sock, &byte, sizeof(byte), ZSOCK_MSG_DONTWAIT);
+	zassert_equal(ret, sizeof(byte), "Cannot read TLS application data");
+	zassert_equal(byte, 'A', "Wrong TLS application data");
+
+	test_sockets_close();
+	k_sleep(TCP_TEARDOWN_TIMEOUT);
+}
+
+ZTEST(net_socket_tls, test_poll_tls_transport_eof)
+{
+	struct zsock_pollfd fds[1];
+	uint8_t byte = 'A';
+	int ret;
+
+	test_prepare_tls_connection(NET_AF_INET6);
+
+	/* Shut down the underlying receive side without TLS close_notify. */
+	test_shutdown(new_sock, ZSOCK_SHUT_RD);
+	fds[0].fd = new_sock;
+	fds[0].events = ZSOCK_POLLIN;
+	ret = zsock_poll(fds, 1, 100);
+	zassert_equal(ret, 1, "poll() did not report transport EOF");
+	zassert_true(fds[0].revents & ZSOCK_POLLHUP, "No POLLHUP event");
+	ret = zsock_poll(fds, 1, 0);
+	zassert_equal(ret, 1, "poll() lost transport EOF");
+	zassert_true(fds[0].revents & ZSOCK_POLLHUP, "No repeated POLLHUP event");
+
+	ret = zsock_recv(new_sock, &byte, sizeof(byte), ZSOCK_MSG_DONTWAIT);
+	zassert_equal(ret, 0, "TLS recv() did not report transport EOF");
+	ret = zsock_send(new_sock, &byte, sizeof(byte), ZSOCK_MSG_DONTWAIT);
+	zassert_equal(ret, -1, "TLS send() succeeded after transport EOF");
+	zassert_equal(errno, ECONNABORTED, "Wrong errno after transport EOF");
+
+	test_sockets_close();
+	k_sleep(TCP_TEARDOWN_TIMEOUT);
+}
+
+ZTEST(net_socket_tls, test_poll_tls_buffered_data_before_transport_eof)
+{
+	static const uint8_t payload[] = "abc";
+	struct zsock_pollfd fds[1];
+	uint8_t rx_buf[sizeof(payload) - 1];
+	int ret;
+
+	test_prepare_tls_connection(NET_AF_INET6);
+	test_send(c_sock, payload, sizeof(payload) - 1, 0);
+
+	fds[0].fd = new_sock;
+	fds[0].events = ZSOCK_POLLIN;
+	ret = zsock_poll(fds, 1, 100);
+	zassert_equal(ret, 1, "poll() did not report buffered application data");
+	zassert_true(fds[0].revents & ZSOCK_POLLIN, "No POLLIN event");
+
+	ret = zsock_recv(new_sock, rx_buf, 1, ZSOCK_MSG_DONTWAIT);
+	zassert_equal(ret, 1, "Cannot read first buffered application byte");
+	zassert_equal(rx_buf[0], payload[0], "Wrong first application byte");
+
+	/* The remaining plaintext is already inside Mbed TLS when EOF arrives. */
+	test_shutdown(new_sock, ZSOCK_SHUT_RD);
+	ret = zsock_poll(fds, 1, 100);
+	zassert_equal(ret, 1, "poll() did not report remaining buffered data");
+	zassert_true(fds[0].revents & ZSOCK_POLLIN, "No POLLIN for buffered data");
+
+	ret = zsock_recv(new_sock, rx_buf, sizeof(rx_buf) - 1, ZSOCK_MSG_DONTWAIT);
+	zassert_equal(ret, sizeof(rx_buf) - 1, "Cannot drain remaining application data");
+	zassert_mem_equal(rx_buf, payload + 1, sizeof(rx_buf) - 1,
+			  "Wrong remaining application data");
+
+	ret = zsock_poll(fds, 1, 100);
+	zassert_equal(ret, 1, "poll() did not report EOF after buffered data");
+	zassert_true(fds[0].revents & ZSOCK_POLLHUP, "No POLLHUP after buffered data");
+	ret = zsock_recv(new_sock, rx_buf, sizeof(rx_buf), ZSOCK_MSG_DONTWAIT);
+	zassert_equal(ret, 0, "TLS recv() did not report EOF after buffered data");
+
+	test_sockets_close();
+	k_sleep(TCP_TEARDOWN_TIMEOUT);
+}
+
 ZTEST(net_socket_tls, test_poll_tls_pollout)
 {
 	int buf_optval = TLS_RECORD_OVERHEAD + sizeof(TEST_STR_SMALL) - 1;

@@ -1,0 +1,7 @@
+tests:
+  drivers.timer.stm32_lptim_timer:
+    tags:
+      - drivers
+      - timer
+    platform_allow:
+      - native_sim/native/64

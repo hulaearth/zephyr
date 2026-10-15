@@ -1,0 +1,4 @@
+tests:
+  drivers.clock.stm32n6.rate:
+    platform_allow:
+      - native_sim/native/64

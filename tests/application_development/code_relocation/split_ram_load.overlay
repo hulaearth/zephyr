@@ -1,0 +1,19 @@
+/*
+ * SPDX-FileCopyrightText: Copyright The Zephyr Project Contributors
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/* AN385 ZBT SSRAM1 is writable and executable at the reset-vector address.
+ * Load the non-XIP image there so QEMU can boot it without a bootloader.
+ * The existing linker script places generated relocation in its upper half.
+ */
+/ {
+	chosen {
+		zephyr,sram = &boot_sram;
+	};
+
+	boot_sram: memory@0 {
+		compatible = "mmio-sram";
+		reg = <0x00000000 0x00400000>;
+	};
+};

@@ -21,9 +21,10 @@ menuconfig STM32_LPTIM_TIMER
 	depends on $(dt_chosen_has_compat,$(DT_CHOSEN_Z_SYSTEM_TIMER),$(DT_COMPAT_ST_STM32_LPTIM))
 	depends on $(dt_chosen_enabled,$(DT_CHOSEN_Z_SYSTEM_TIMER))
 	depends on DT_HAS_ST_STM32_LPTIM_ENABLED
-	depends on CLOCK_CONTROL && PM
+	depends on CLOCK_CONTROL
 	select RESET
 	select TICKLESS_CAPABLE
+	select TIMER_HAS_64BIT_CYCLE_COUNTER
 	select EXPERIMENTAL
 	help
 	  This module implements a kernel device driver for the LowPower Timer
@@ -53,9 +54,9 @@ config STM32_LPTIM_CLOCK
 	default 32000 if STM32_LPTIM_CLOCK_LSI
 
 config STM32_LPTIM_TIMEBASE
-	hex "LPTIM AutoReload value"
-	default 0xFFFF if STM32_LPTIM_CLOCK_LSE
-	default 0xF9FF if STM32_LPTIM_CLOCK_LSI
+	hex "LPTIM period in counter cycles"
+	default 0x10000 if STM32_LPTIM_CLOCK_LSE
+	default 0xFA00 if STM32_LPTIM_CLOCK_LSI
 
 config STM32_LPTIM_TICK_FREQ_RATIO_OVERRIDE
 	bool "Override tick to freq ratio check"
@@ -72,6 +73,7 @@ config STM32_LPTIM_TICK_FREQ_RATIO_OVERRIDE
 config STM32_LPTIM_STDBY_TIMER
 	bool
 	default $(dt_chosen_enabled,$(DT_CHOSEN_STDBY_TIMER))
+	depends on PM
 	depends on COUNTER
 	depends on TICKLESS_KERNEL
 	select EXPERIMENTAL

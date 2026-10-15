@@ -1657,6 +1657,9 @@ static int tls_rx(void *ctx, unsigned char *buf, size_t len)
 
 		return MBEDTLS_ERR_NET_RECV_FAILED;
 	}
+	if (received == 0 && len > 0 && tls_ctx->type == NET_SOCK_STREAM) {
+		tls_ctx->active_session->session_closed = true;
+	}
 
 	return received;
 }
@@ -4279,6 +4282,14 @@ static int tls_data_check(struct tls_context *ctx)
 	if (!ctx->is_initialized) {
 		return -ENOTCONN;
 	}
+	ret = mbedtls_ssl_get_bytes_avail(&ctx->active_session->ssl);
+	if (ret > 0) {
+		return ret;
+	}
+
+	if (ctx->active_session->session_closed) {
+		return -ENOTCONN;
+	}
 
 	ctx->flags = ZSOCK_MSG_DONTWAIT;
 
@@ -4317,7 +4328,16 @@ static int tls_data_check(struct tls_context *ctx)
 		return -ECONNABORTED;
 	}
 
-	return mbedtls_ssl_get_bytes_avail(&ctx->active_session->ssl);
+	ret = mbedtls_ssl_get_bytes_avail(&ctx->active_session->ssl);
+	if (ret > 0) {
+		return ret;
+	}
+
+	if (ctx->active_session->session_closed) {
+		return -ENOTCONN;
+	}
+
+	return ret;
 }
 
 static int tls_update_pollin(int fd, struct tls_context *ctx,

@@ -294,7 +294,11 @@ BUILD_ASSERT(offsetof(struct _isr_table_entry, isr)
 
     def __write_shared_handlers(self, fp):
         array_name = self.__config.shared_array_name
-        fp.write(f"extern struct z_shared_isr_table_entry {array_name}[{self.__nv}];\n")
+        if not self.__config.check_sym("CONFIG_DYNAMIC_INTERRUPTS"):
+            fp.write("extern const ")
+        else:
+            fp.write("extern ")
+        fp.write(f"struct z_shared_isr_table_entry {array_name}[{self.__nv}];\n")
 
         shared_cnt = self.__config.get_sym('CONFIG_SHARED_IRQ_MAX_NUM_CLIENTS')
         for i in range(self.__nv):

@@ -46,6 +46,7 @@
  */
 #define DT_DRV_COMPAT st_stm32_xspi_nor
 
+#include <zephyr/drivers/stm32_xspi_timing.h>
 #include <errno.h>
 #include <zephyr/kernel.h>
 #include <soc.h>
@@ -144,6 +145,11 @@ static int xspi_read_access(const struct device *dev, XSPI_RegularCmdTypeDef *cm
 {
 	struct flash_stm32_xspi_data *dev_data = dev->data;
 	HAL_StatusTypeDef hal_ret;
+	uint32_t fifo_threshold;
+	bool restore_fifo_threshold = false;
+	bool controller_quiescent;
+	bool cleanup_failed = false;
+	int ret;
 
 	LOG_DBG("Instruction 0x%x", cmd->Instruction);
 
@@ -157,20 +163,67 @@ static int xspi_read_access(const struct device *dev, XSPI_RegularCmdTypeDef *cm
 		return -EIO;
 	}
 
+	fifo_threshold = HAL_XSPI_GetFifoThreshold(&dev_data->hxspi);
+	if (size < fifo_threshold) {
+		hal_ret = HAL_XSPI_SetFifoThreshold(&dev_data->hxspi, size);
+		if (hal_ret != HAL_OK) {
+			LOG_ERR("%d: Failed to lower XSPI FIFO threshold", hal_ret);
+			return -EIO;
+		}
+		restore_fifo_threshold = true;
+	}
+
 #ifdef CONFIG_FLASH_STM32_XSPI_DMA
-	hal_ret = HAL_XSPI_Receive_DMA(&dev_data->hxspi, data);
+	/* The DMA channels use word transfers; receive byte tails through the IRQ. */
+	if ((size % 4U) != 0U || (MIN(size, fifo_threshold) % 4U) != 0U ||
+	    !IS_ALIGNED(data, 4U)) {
+		hal_ret = HAL_XSPI_Receive_IT(&dev_data->hxspi, data);
+	} else {
+		hal_ret = HAL_XSPI_Receive_DMA(&dev_data->hxspi, data);
+	}
 #else
 	hal_ret = HAL_XSPI_Receive_IT(&dev_data->hxspi, data);
 #endif
 
 	if (hal_ret != HAL_OK) {
 		LOG_ERR("%d: Failed to read data", hal_ret);
-		return -EIO;
+		ret = -EIO;
+		goto cleanup;
 	}
 
 	k_sem_take(&dev_data->sync, K_FOREVER);
 
-	return dev_data->cmd_status;
+	ret = dev_data->cmd_status;
+
+cleanup:
+	/* A completed short read can leave BUSY set or data in the FIFO. */
+	if ((dev_data->hxspi.Instance->SR & (XSPI_SR_BUSY | XSPI_SR_FLEVEL)) != 0U) {
+		hal_ret = HAL_XSPI_Abort(&dev_data->hxspi);
+		if (hal_ret != HAL_OK) {
+			LOG_ERR("%d: Failed to quiesce incomplete XSPI read", hal_ret);
+			cleanup_failed = true;
+		}
+	}
+	controller_quiescent =
+		(dev_data->hxspi.Instance->SR & (XSPI_SR_BUSY | XSPI_SR_FLEVEL)) == 0U;
+	if (!controller_quiescent) {
+		LOG_ERR("XSPI read remained active after quiesce");
+		cleanup_failed = true;
+	}
+
+	/* Do not change the threshold while the controller is still active. */
+	if (restore_fifo_threshold && controller_quiescent) {
+		hal_ret = HAL_XSPI_SetFifoThreshold(&dev_data->hxspi, fifo_threshold);
+		if (hal_ret != HAL_OK) {
+			LOG_ERR("%d: Failed to restore XSPI FIFO threshold", hal_ret);
+			cleanup_failed = true;
+		}
+	}
+
+	if (ret == 0 && cleanup_failed) {
+		ret = -EIO;
+	}
+	return ret;
 }
 
 static int xspi_write_access(struct flash_stm32_xspi_data *dev_data,
@@ -290,52 +343,51 @@ static uint32_t stm32_xspi_hal_address_size(const struct flash_stm32_xspi_data *
 	return HAL_XSPI_ADDRESS_24_BITS;
 }
 
-#if defined(CONFIG_FLASH_JESD216_API)
-/*
- * Read the JEDEC ID data from the external Flash at init
- * and store in the jedec_id Table of the flash_stm32_xspi_data
- * The JEDEC ID is not given by a DTS property
- */
-static int stm32_xspi_read_jedec_id(const struct device *dev)
+/* Read identity in reset-default SPI mode before vendor-specific configuration. */
+static int stm32_xspi_read_jedec_id(const struct device *dev, uint32_t source_frequency)
 {
+	const struct flash_stm32_xspi_config *dev_cfg = dev->config;
 	struct flash_stm32_xspi_data *dev_data = dev->data;
-
-	/* This is a SPI/STR command to issue to the external Flash device */
 	XSPI_RegularCmdTypeDef cmd;
+	uint32_t prescaler = dev_data->hxspi.Init.ClockPrescaler;
+	uint32_t id_prescaler = MAX(prescaler, DIV_ROUND_UP(source_frequency, MHZ(25)) - 1U);
+	HAL_StatusTypeDef restore_ret;
+	int ret;
 
-	xspi_prepare_cmd(&cmd, XSPI_SPI_MODE, XSPI_STR_TRANSFER);
-
-	cmd.Instruction = JESD216_CMD_READ_ID;
-	cmd.AddressWidth = stm32_xspi_hal_address_size(dev_data);
-	cmd.AddressMode = HAL_XSPI_ADDRESS_NONE;
-	cmd.DataLength = JESD216_READ_ID_LEN; /* 3 bytes in the READ ID */
-
-	HAL_StatusTypeDef hal_ret;
-
-	hal_ret = HAL_XSPI_Command(&dev_data->hxspi, &cmd,
-				   HAL_XSPI_TIMEOUT_DEFAULT_VALUE);
-
-	if (hal_ret != HAL_OK) {
-		LOG_ERR("%d: Failed to send XSPI instruction", hal_ret);
+	/* RDID is a legacy-SPI command, not a high-speed octal transfer. */
+	if (id_prescaler > STM32_XSPI_CLOCK_PRESCALER_MAX ||
+	    HAL_XSPI_SetClockPrescaler(&dev_data->hxspi, id_prescaler) != HAL_OK) {
 		return -EIO;
 	}
 
-	/* Place the received data directly into the jedec Table */
-	hal_ret = HAL_XSPI_Receive(&dev_data->hxspi, dev_data->jedec_id,
-				   HAL_XSPI_TIMEOUT_DEFAULT_VALUE);
-	if (hal_ret != HAL_OK) {
-		LOG_ERR("%d: Failed to read data", hal_ret);
-		return -EIO;
+	xspi_prepare_cmd(&cmd, XSPI_SPI_MODE, XSPI_STR_TRANSFER);
+	cmd.Instruction = JESD216_CMD_READ_ID;
+	cmd.AddressMode = HAL_XSPI_ADDRESS_NONE;
+	ret = xspi_read_access(dev, &cmd, dev_data->jedec_id, JESD216_READ_ID_LEN);
+	restore_ret = HAL_XSPI_SetClockPrescaler(&dev_data->hxspi, prescaler);
+	if (ret == 0 && restore_ret != HAL_OK) {
+		ret = -EIO;
+	}
+	if (ret != 0) {
+		return ret;
 	}
 
 	LOG_DBG("Jedec ID = [%02x %02x %02x]",
 		dev_data->jedec_id[0], dev_data->jedec_id[1], dev_data->jedec_id[2]);
 
-	dev_data->cmd_status = 0;
+	if (dev_cfg->check_jedec_id &&
+	    memcmp(dev_data->jedec_id, dev_cfg->expected_jedec_id, JESD216_READ_ID_LEN) != 0) {
+		LOG_ERR("Flash identity mismatch: got %02x %02x %02x, expected %02x %02x %02x",
+			dev_data->jedec_id[0], dev_data->jedec_id[1], dev_data->jedec_id[2],
+			dev_cfg->expected_jedec_id[0], dev_cfg->expected_jedec_id[1],
+			dev_cfg->expected_jedec_id[2]);
+		return -ENODEV;
+	}
 
 	return 0;
 }
 
+#if defined(CONFIG_FLASH_JESD216_API)
 /*
  * Read Serial Flash ID :
  * just gives the values received by the external Flash
@@ -1096,7 +1148,9 @@ static void stm32_xspi_invalidate_mmap_cache(const struct device *dev, off_t add
 	size_t line_size = sys_cache_data_line_size_get();
 
 	if (line_size != 0 && IS_ENABLED(CONFIG_DCACHE) &&
-	    IS_ENABLED(CONFIG_FLASH_STM32_NOR_MEMMAP) &&
+	    (IS_ENABLED(CONFIG_FLASH_STM32_NOR_MEMMAP) ||
+	     (IS_ENABLED(CONFIG_STM32_APP_IN_EXT_FLASH) && IS_ENABLED(CONFIG_XIP)) ||
+	     IS_ENABLED(CONFIG_FLASH_STM32_XSPI_RAM_RELOCATION)) &&
 	    IS_ENABLED(CONFIG_CACHE_MANAGEMENT)) {
 		uintptr_t start = ROUND_DOWN(dev_cfg->mem_map_based_address + addr, line_size);
 		uintptr_t end = ROUND_UP(dev_cfg->mem_map_based_address + addr + size, line_size);
@@ -1120,6 +1174,10 @@ static int flash_stm32_xspi_erase(const struct device *dev, off_t addr,
 	const uint8_t data_mode = dev_cfg->data_mode;
 	const uint8_t data_rate = dev_cfg->data_rate;
 	int ret = 0;
+
+	if (!device_is_ready(dev)) {
+		return -ENODEV;
+	}
 
 	/* Ignore zero size erase */
 	if (size == 0) {
@@ -1462,6 +1520,10 @@ static int flash_stm32_xspi_write(const struct device *dev, off_t addr,
 	size_t to_write;
 	int ret = 0;
 
+	if (!device_is_ready(dev)) {
+		return -ENODEV;
+	}
+
 	if (!xspi_address_is_valid(dev, addr, size)) {
 		LOG_ERR("Error: address or size exceeds expected values: "
 			"addr 0x%lx, size %zu", (long)addr, size);
@@ -1471,6 +1533,12 @@ static int flash_stm32_xspi_write(const struct device *dev, off_t addr,
 	/* Ignore zero size write */
 	if (size == 0) {
 		return 0;
+	}
+
+	/* Octal DTR page programs require an even address and byte count. */
+	if ((data_mode == XSPI_OCTO_MODE) && (data_rate == XSPI_DTR_TRANSFER) &&
+	    (((addr & 1) != 0) || ((size & 1) != 0))) {
+		return -EINVAL;
 	}
 
 	const off_t write_addr = addr;
@@ -1631,11 +1699,20 @@ static const struct flash_parameters flash_stm32_xspi_parameters = {
 	.erase_value = 0xff
 };
 
+static const struct flash_parameters flash_stm32_xspi_dtr_parameters = {
+	.write_block_size = 2,
+	.erase_value = 0xff
+};
+
 static const struct flash_parameters *
 flash_stm32_xspi_get_parameters(const struct device *dev)
 {
-	ARG_UNUSED(dev);
+	const struct flash_stm32_xspi_config *dev_cfg = dev->config;
 
+	if ((dev_cfg->data_mode == XSPI_OCTO_MODE) &&
+	    (dev_cfg->data_rate == XSPI_DTR_TRANSFER)) {
+		return &flash_stm32_xspi_dtr_parameters;
+	}
 	return &flash_stm32_xspi_parameters;
 }
 
@@ -2268,7 +2345,7 @@ static int flash_stm32_xspi_dma_init(DMA_HandleTypeDef *hdma, struct stream *dma
 #endif /* CONFIG_FLASH_STM32_XSPI_DMA */
 
 
-static int flash_stm32_xspi_init(const struct device *dev)
+static int flash_stm32_xspi_init_impl(const struct device *dev)
 {
 	const struct flash_stm32_xspi_config *dev_cfg = dev->config;
 	struct flash_stm32_xspi_data *dev_data = dev->data;
@@ -2290,6 +2367,7 @@ static int flash_stm32_xspi_init(const struct device *dev)
 				     == CLOCK_CONTROL_STATUS_ON) {
 		if (stm32_xspi_is_memorymap(dev_data)) {
 			LOG_DBG("NOR init'd in MemMapped mode");
+			/* The inherited XIP protocol cannot be interrupted for SPI RDID. */
 
 			/* Full init is bypassed when already in XIP ext-flash mode,
 			 * so set required runtime defaults here.
@@ -2479,14 +2557,14 @@ static int flash_stm32_xspi_init(const struct device *dev)
 
 	LOG_DBG("Mem Ready (SPI/STR)");
 
-#if defined(CONFIG_FLASH_JESD216_API)
-	/* Process with the RDID (jedec read ID) instruction at init and fill jedec_id Table */
-	ret = stm32_xspi_read_jedec_id(dev);
-	if (ret != 0) {
-		LOG_ERR("Read ID failed: %d", ret);
-		return ret;
+	/* Cold initialization checks identity before configuring the flash protocol. */
+	if (dev_cfg->check_jedec_id || IS_ENABLED(CONFIG_FLASH_JESD216_API)) {
+		ret = stm32_xspi_read_jedec_id(dev, ahb_clock_freq);
+		if (ret != 0) {
+			LOG_ERR("Read ID failed: %d", ret);
+			return ret;
+		}
 	}
-#endif /* CONFIG_FLASH_JESD216_API */
 
 	if (stm32_xspi_config_mem(dev) != 0) {
 		LOG_ERR("OSPI mode not config'd (%u rate %u)",
@@ -2619,6 +2697,15 @@ static int flash_stm32_xspi_init(const struct device *dev)
 	return 0;
 }
 
+static int flash_stm32_xspi_init(const struct device *dev)
+{
+	STM32_XSPI_INIT_TIME_BEGIN(init_start);
+	int ret = flash_stm32_xspi_init_impl(dev);
+
+	STM32_XSPI_INIT_TIME_END("nor_init", init_start, ret);
+	return ret;
+}
+
 
 #ifdef CONFIG_FLASH_STM32_XSPI_DMA
 #define DMA_CHANNEL_CONFIG(node, dir)						\
@@ -2725,6 +2812,10 @@ static int flash_stm32_xspi_init(const struct device *dev)
 		.data_rate = DT_INST_PROP(inst, data_rate),			/* DTR or STR */\
 		.four_byte_opcodes = DT_INST_PROP_OR(inst, four_byte_opcodes, 0),		\
 		.requires_ulbpr = DT_INST_PROP_OR(inst, requires_ulbpr, 0),			\
+		.check_jedec_id = DT_INST_NODE_HAS_PROP(inst, jedec_id),			\
+		IF_ENABLED(DT_INST_NODE_HAS_PROP(inst, jedec_id), (				\
+			.expected_jedec_id = DT_INST_PROP(inst, jedec_id),			\
+		))									\
 		IF_ENABLED(DT_INST_NODE_HAS_PROP(inst, reset_gpios), (				\
 			.reset = GPIO_DT_SPEC_INST_GET(0, reset_gpios),				\
 			.reset_gpios_duration = DT_INST_PROP_OR(inst, reset_gpios_duration, 1),	\
@@ -2754,10 +2845,6 @@ static int flash_stm32_xspi_init(const struct device *dev)
 		.qer_type = DT_QER_PROP_OR(inst, JESD216_DW15_QER_VAL_S1B6),			\
 		.write_opcode = DT_WRITEOC_PROP_OR(inst, SPI_NOR_WRITEOC_NONE),			\
 		.page_size = SPI_NOR_PAGE_SIZE, /* by default, to be updated by sfdp */		\
-		IF_ENABLED(DT_INST_NODE_HAS_PROP(inst, jedec_id), (			\
-			IF_ENABLED(CONFIG_FLASH_JESD216_API,				\
-				(.jedec_id = DT_INST_PROP(inst, jedec_id),))			\
-		))									\
 												\
 		XSPI_DMA_CHANNEL(STM32_XSPI_NODE(inst), tx, TX, MEMORY, PERIPHERAL)		\
 		XSPI_DMA_CHANNEL(STM32_XSPI_NODE(inst), rx, RX, PERIPHERAL, MEMORY)		\

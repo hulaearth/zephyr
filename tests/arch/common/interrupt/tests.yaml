@@ -114,6 +114,15 @@ tests:
       - CONFIG_ISR_TABLES_LOCAL_DECLARATION=y
       - CONFIG_LTO=y
       - CONFIG_SPEED_OPTIMIZATIONS=y
+  arch.shared_interrupt.lto.static_local:
+    <<: *shared-interrupt-lto
+    platform_allow: qemu_cortex_m3
+    extra_configs:
+      - CONFIG_SHARED_INTERRUPTS=y
+      - CONFIG_TEST_USERSPACE=n
+      - CONFIG_ISR_TABLES_LOCAL_DECLARATION=y
+      - CONFIG_LTO=y
+      - CONFIG_DYNAMIC_INTERRUPTS=n
   arch.interrupt.multilevel:
     filter: CONFIG_MULTI_LEVEL_INTERRUPTS
     extra_args:
