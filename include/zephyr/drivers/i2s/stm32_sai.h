@@ -1,4 +1,8 @@
-/* SPDX-License-Identifier: Apache-2.0 */
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 Hula Firmware
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
 #ifndef ZEPHYR_INCLUDE_DRIVERS_I2S_STM32_SAI_H_
 #define ZEPHYR_INCLUDE_DRIVERS_I2S_STM32_SAI_H_
 
