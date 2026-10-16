@@ -160,6 +160,9 @@ typedef struct {
 	/* Keep host pointers intact; the target register is 32-bit on STM32N6. */
 	uintptr_t CDAR;
 	uint32_t CSR;
+	uint32_t CBR1;
+	uint32_t CSAR;
+	uint32_t CLLR;
 } DMA_Channel_TypeDef;
 
 typedef struct {
@@ -214,6 +217,7 @@ typedef struct DMA_HandleTypeDef {
 	DMA_InitLinkedListTypeDef InitLinkedList;
 	void *Parent;
 	uint32_t flags;
+	uint32_t ErrorCode;
 	void (*XferHalfCpltCallback)(void);
 	void (*XferCpltCallback)(void);
 	void (*XferErrorCallback)(void);
@@ -279,6 +283,7 @@ struct stream {
 	bool continuous_stop_target_complete;
 	uint8_t continuous_stop_target;
 	bool continuous_fault;
+	struct stm32_sai_rx_fault continuous_first_fault;
 	DMA_NodeTypeDef *continuous_nodes[SAI_CONT_RX_NODE_COUNT];
 	DMA_NodeTypeDef *continuous_tail;
 	uint32_t continuous_link_mask;
