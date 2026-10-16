@@ -2475,8 +2475,11 @@ static int flash_stm32_xspi_init_impl(const struct device *dev)
 
 	if (stm32_xspi_is_memorymap(dev_data)) {
 		/* Memory-mapping could have been set by previous application.
+		 * HAL init skips timeout setup for a mapped handle.
 		 * Force HAL instance in correct state.
 		 */
+		HAL_XSPI_SetTimeout(&dev_data->hxspi,
+				    HAL_XSPI_TIMEOUT_DEFAULT_VALUE);
 		dev_data->hxspi.State = HAL_XSPI_STATE_BUSY_MEM_MAPPED;
 	}
 
