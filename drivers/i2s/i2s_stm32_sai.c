@@ -104,6 +104,7 @@ struct stream {
 	bool continuous_stop_target_complete;
 	uint8_t continuous_stop_target;
 	bool continuous_fault;
+	struct stm32_sai_rx_fault continuous_first_fault;
 	DMA_NodeTypeDef *continuous_nodes[SAI_CONT_RX_NODE_COUNT];
 	DMA_NodeTypeDef *continuous_tail;
 	uint32_t continuous_link_mask;
@@ -477,6 +478,47 @@ static int sai_sub_init(const struct device *dev)
 	return 0;
 }
 
+#if defined(CONFIG_I2S_STM32_SAI_CONTINUOUS_RX_N6)
+static void continuous_rx_latch_fault(struct stm32_sai_sub_data *sub_data,
+				      enum stm32_sai_rx_fault_reason reason, int status,
+				      uint32_t flags)
+{
+	struct stream *stream = &sub_data->stream;
+	DMA_HandleTypeDef *hdma = &sub_data->hdma;
+	unsigned int key = irq_lock();
+
+	if (stream->continuous_first_fault.reason == STM32_SAI_RX_FAULT_NONE) {
+		struct stm32_sai_rx_fault *fault = &stream->continuous_first_fault;
+
+		fault->cycle = k_cycle_get_32();
+		fault->status = status;
+		fault->stream_state = stream->state;
+		fault->sai_sr = sub_data->hsai.Instance->SR;
+		fault->sai_cr1 = sub_data->hsai.Instance->CR1;
+		fault->sai_error = sub_data->hsai.ErrorCode;
+		fault->dma_flags = flags;
+		fault->dma_csr = hdma->Instance->CSR;
+		fault->dma_ccr = hdma->Instance->CCR;
+		fault->dma_cbr1 = hdma->Instance->CBR1;
+		fault->dma_csar = hdma->Instance->CSAR;
+		fault->dma_cdar = hdma->Instance->CDAR;
+		fault->dma_cllr = hdma->Instance->CLLR;
+		fault->dma_error = hdma->ErrorCode;
+		fault->completion_count = stream->continuous_completion_count;
+		fault->append_count = stream->continuous_append_count;
+		fault->node_states = 0U;
+		for (uint8_t i = 0U; i < SAI_CONT_RX_NODE_COUNT; i++) {
+			fault->node_states |= (uint32_t)stream->continuous_node_state[i]
+					      << (2U * i);
+		}
+		fault->next_complete = stream->continuous_next_complete;
+		fault->next_release = stream->continuous_next_release;
+		fault->reason = reason;
+	}
+	irq_unlock(key);
+}
+#endif
+
 static void dma_callback(const struct device *dma_dev, void *arg, uint32_t channel, int status)
 {
 	DMA_HandleTypeDef *hdma = arg;
@@ -502,6 +544,7 @@ static void dma_callback(const struct device *dma_dev, void *arg, uint32_t chann
 		uint32_t tc = flags & DMA_FLAG_TC;
 		uint32_t ht = flags & DMA_FLAG_HT;
 		if (status < 0 || errors != 0U || sai_errors != 0U) {
+			continuous_rx_latch_fault(sub_data, STM32_SAI_RX_FAULT_DMA, status, flags);
 			if (flags != 0U) {
 				__HAL_DMA_CLEAR_FLAG(hdma, flags);
 			}
@@ -611,6 +654,7 @@ static void dma_callback(const struct device *dma_dev, void *arg, uint32_t chann
 			return;
 		}
 		if (plan != SAI_RX_PREFIX_READY) {
+			continuous_rx_latch_fault(sub_data, STM32_SAI_RX_FAULT_PREFIX, -EIO, flags);
 			stream->continuous_fault = true;
 			stream->state = I2S_STATE_ERROR;
 			__HAL_DMA_DISABLE(hdma);
@@ -639,6 +683,8 @@ static void dma_callback(const struct device *dma_dev, void *arg, uint32_t chann
 				.size = stream->i2s_cfg.block_size,
 			};
 			if (k_msgq_put(&stream->queue, &item, K_NO_WAIT) != 0) {
+				continuous_rx_latch_fault(sub_data, STM32_SAI_RX_FAULT_QUEUE, -EIO,
+							  flags);
 				stream->continuous_fault = true;
 				stream->state = I2S_STATE_ERROR;
 				__HAL_DMA_DISABLE(hdma);
@@ -1067,6 +1113,8 @@ static int stm32_sai_sub_read(const struct device *dev, void **mem_block, size_t
 			uint32_t sai_status = sub_data->hsai.Instance->SR &
 				(SAI_xSR_OVRUDR | SAI_xSR_WCKCFG | SAI_xSR_AFSDET | SAI_xSR_LFSDET);
 			if (sai_status != 0U) {
+				continuous_rx_latch_fault(sub_data, STM32_SAI_RX_FAULT_READ_SAI,
+							  ret, sub_data->hdma.Instance->CSR);
 				stream->continuous_fault = true;
 				stream->state = I2S_STATE_ERROR;
 				__HAL_DMA_DISABLE(&sub_data->hdma);
@@ -1095,6 +1143,8 @@ static int stm32_sai_sub_read(const struct device *dev, void **mem_block, size_t
 			}
 		}
 		if (!found) {
+			continuous_rx_latch_fault(sub_data, STM32_SAI_RX_FAULT_READ_OWNER, -EIO,
+						  sub_data->hdma.Instance->CSR);
 			stream->continuous_fault = true;
 			stream->state = I2S_STATE_ERROR;
 			return -EIO;
@@ -1142,6 +1192,7 @@ static int continuous_rx_start(const struct device *dev)
 	stream->continuous_slab_high_water = 0U;
 	unsigned int key = irq_lock();
 
+	memset(&stream->continuous_first_fault, 0, sizeof(stream->continuous_first_fault));
 	stream->continuous_append_count = 0U;
 	stream->continuous_append_readback_failures = 0U;
 	stream->continuous_appended_completions = 0U;
@@ -1166,6 +1217,8 @@ static int continuous_rx_start(const struct device *dev)
 	hdma->InitLinkedList.LinkedListMode = DMA_LINKEDLIST_NORMAL;
 	hdma->InitLinkedList.LinkAllocatedPort = DMA_LINK_ALLOCATED_PORT1;
 	if (HAL_DMAEx_List_Init(hdma) != HAL_OK) {
+		continuous_rx_latch_fault(sub_data, STM32_SAI_RX_FAULT_START, -EIO,
+					  hdma->Instance->CSR);
 		stream->continuous_fault = true;
 		stream->state = I2S_STATE_ERROR;
 		return -EIO;
@@ -1229,6 +1282,8 @@ static int continuous_rx_start(const struct device *dev)
 	hdma->XferSuspendCallback = NULL;
 	__DSB();
 	if (HAL_DMAEx_List_Start_IT(hdma) != HAL_OK) {
+		continuous_rx_latch_fault(sub_data, STM32_SAI_RX_FAULT_START, -EIO,
+					  hdma->Instance->CSR);
 		if ((hdma->Instance->CCR & DMA_CCR_EN) != 0U) {
 			stream->continuous_fault = true;
 			stream->state = I2S_STATE_ERROR;
@@ -1245,6 +1300,7 @@ static int continuous_rx_start(const struct device *dev)
 	return 0;
 
 free_blocks:
+	continuous_rx_latch_fault(sub_data, STM32_SAI_RX_FAULT_START, -EIO, hdma->Instance->CSR);
 	if (HAL_DMAEx_List_DeInit(hdma) != HAL_OK) {
 		stream->continuous_fault = true;
 		stream->state = I2S_STATE_ERROR;
@@ -1277,6 +1333,8 @@ static int continuous_rx_quiesce(const struct device *dev, bool preserve_queue)
 		__HAL_DMA_DISABLE_IT(hdma, interrupt_mask);
 		if ((hdma->Instance->CCR & DMA_CCR_EN) != 0U) {
 			if (HAL_SAI_DMAStop(hsai) != HAL_OK) {
+				continuous_rx_latch_fault(sub_data, STM32_SAI_RX_FAULT_QUIESCE,
+							  -EIO, hdma->Instance->CSR);
 				stream->state = I2S_STATE_ERROR;
 				stream->continuous_fault = true;
 				return -EIO;
@@ -1285,6 +1343,8 @@ static int continuous_rx_quiesce(const struct device *dev, bool preserve_queue)
 			hsai->Instance->CR1 &= ~SAI_xCR1_DMAEN;
 			__HAL_SAI_DISABLE(hsai);
 			if ((hsai->Instance->CR1 & SAI_xCR1_SAIEN) != 0U) {
+				continuous_rx_latch_fault(sub_data, STM32_SAI_RX_FAULT_QUIESCE,
+							  -EIO, hdma->Instance->CSR);
 				stream->state = I2S_STATE_ERROR;
 				stream->continuous_fault = true;
 				return -EIO;
@@ -1295,6 +1355,8 @@ static int continuous_rx_quiesce(const struct device *dev, bool preserve_queue)
 		    (hsai->Instance->CR1 & SAI_xCR1_SAIEN) != 0U ||
 		    (hdma->Instance->CSR & DMA_CSR_IDLEF) == 0U ||
 		    HAL_DMAEx_List_DeInit(hdma) != HAL_OK) {
+			continuous_rx_latch_fault(sub_data, STM32_SAI_RX_FAULT_QUIESCE, -EIO,
+						  hdma->Instance->CSR);
 			stream->state = I2S_STATE_ERROR;
 			stream->continuous_fault = true;
 			return -EIO;
@@ -1508,6 +1570,8 @@ int stm32_sai_rx_release(const struct device *dev, void *buffer)
 		stream->continuous_append_readback_failures++;
 	}
 	if ((sub_data->hdma.Instance->CCR & DMA_CCR_EN) == 0U) {
+		continuous_rx_latch_fault(sub_data, STM32_SAI_RX_FAULT_RELEASE_IDLE, -EIO,
+					  sub_data->hdma.Instance->CSR);
 		stream->continuous_tail->LinkRegisters[5] = 0U;
 		__DSB();
 		stream->continuous_fault = true;
@@ -1540,6 +1604,7 @@ int stm32_sai_rx_get_evidence(const struct device *dev, struct stm32_sai_rx_evid
 	}
 	key = irq_lock();
 	*evidence = (struct stm32_sai_rx_evidence){
+		.first_fault = stream->continuous_first_fault,
 		.append_count = stream->continuous_append_count,
 		.append_readback_failures = stream->continuous_append_readback_failures,
 		.appended_completions = stream->continuous_appended_completions,

@@ -699,4 +699,142 @@ ZTEST(i2s_stm32_sai_continuous_rx, test_start_error_after_enable_keeps_dma_owner
 	fixture_cleanup();
 }
 
+ZTEST(i2s_stm32_sai_continuous_rx, test_first_dma_fault_survives_cleanup_and_restart_gate)
+{
+	struct stm32_sai_rx_evidence before;
+	struct stm32_sai_rx_evidence after;
+	void *borrowed;
+	size_t size;
+
+	fixture_init();
+	fixture_callback(DMA_FLAG_HT, (uintptr_t)fixture_data.stream.continuous_blocks[1] + 4U);
+	zassert_ok(stm32_sai_sub_read(&fixture_device, &borrowed, &size));
+	fixture_data.hsai.ErrorCode = 0x1234U;
+	fixture_data.hdma.ErrorCode = 0x5678U;
+	fixture_dma_registers.CBR1 = 12U;
+	fixture_dma_registers.CSAR = 0x46005420U;
+	fixture_dma_registers.CLLR = 0x3fU;
+	fixture_sai_registers.SR = SAI_xSR_OVRUDR;
+	fixture_callback(DMA_FLAG_TC | DMA_FLAG_DTE,
+			 (uintptr_t)fixture_data.stream.continuous_blocks[1] + 8U);
+	zassert_ok(stm32_sai_rx_get_evidence(&fixture_device, &before));
+	zassert_equal(STM32_SAI_RX_FAULT_DMA, before.first_fault.reason);
+	zassert_equal(I2S_STATE_RUNNING, before.first_fault.stream_state);
+	zassert_equal(DMA_FLAG_TC | DMA_FLAG_DTE, before.first_fault.dma_flags);
+	zassert_equal(DMA_CCR_EN, before.first_fault.dma_ccr);
+	zassert_equal(SAI_xCR1_DMAEN | SAI_xCR1_SAIEN, before.first_fault.sai_cr1);
+	zassert_equal(SAI_xSR_OVRUDR, before.first_fault.sai_sr);
+	zassert_equal(0x1234U, before.first_fault.sai_error);
+	zassert_equal(0x5678U, before.first_fault.dma_error);
+	zassert_equal(12U, before.first_fault.dma_cbr1);
+	zassert_equal(0x46005420U, before.first_fault.dma_csar);
+	zassert_equal(0x3fU, before.first_fault.dma_cllr);
+	zassert_equal(1U, before.first_fault.completion_count);
+	zassert_equal(SAI_CONT_RX_NODE_BORROWED, before.first_fault.node_states & 3U);
+	zassert_equal(0U, fixture_data.hdma.flags);
+
+	/* Later interrupts, HAL cleanup and rejected starts must retain the packet. */
+	fixture_callback(DMA_FLAG_ULE, 0U);
+	fixture_data.hsai.ErrorCode = 0U;
+	fixture_data.hdma.ErrorCode = 0U;
+	fixture_sai_registers.SR = 0U;
+	fixture_complete_dma_stop();
+	zassert_ok(stm32_sai_sub_trigger(&fixture_device, I2S_DIR_RX, I2S_TRIGGER_PREPARE));
+	zassert_equal(-EBUSY,
+		      stm32_sai_sub_trigger(&fixture_device, I2S_DIR_RX, I2S_TRIGGER_START));
+	zassert_ok(stm32_sai_rx_get_evidence(&fixture_device, &after));
+	zassert_mem_equal(&before.first_fault, &after.first_fault, sizeof(before.first_fault));
+	zassert_ok(stm32_sai_rx_release(&fixture_device, borrowed));
+	zassert_ok(stm32_sai_sub_trigger(&fixture_device, I2S_DIR_RX, I2S_TRIGGER_START));
+	zassert_ok(stm32_sai_rx_get_evidence(&fixture_device, &after));
+	zassert_equal(STM32_SAI_RX_FAULT_NONE, after.first_fault.reason);
+	fixture_cleanup();
+}
+
+ZTEST(i2s_stm32_sai_continuous_rx, test_fault_flags_and_negative_callback_status)
+{
+	const uint32_t flags[] = {DMA_FLAG_DTE, DMA_FLAG_ULE,  DMA_FLAG_USE,
+				  DMA_FLAG_TO,  DMA_FLAG_SUSP, 0U};
+
+	for (size_t i = 0U; i < ARRAY_SIZE(flags); i++) {
+		struct stm32_sai_rx_evidence evidence;
+
+		fixture_init();
+		fixture_data.hdma.flags = flags[i];
+		int status = flags[i] == 0U ? -EIO : 0;
+
+		dma_callback(NULL, &fixture_data.hdma, 0U, status);
+		zassert_ok(stm32_sai_rx_get_evidence(&fixture_device, &evidence));
+		zassert_equal(STM32_SAI_RX_FAULT_DMA, evidence.first_fault.reason);
+		zassert_equal(status, evidence.first_fault.status);
+		zassert_equal(flags[i], evidence.first_fault.dma_flags);
+		fixture_cleanup();
+	}
+}
+
+ZTEST(i2s_stm32_sai_continuous_rx, test_prefix_fault_retains_acknowledged_callback_flags)
+{
+	struct stm32_sai_rx_evidence evidence;
+
+	fixture_init();
+	fixture_callback(DMA_FLAG_TC, 0U);
+	zassert_ok(stm32_sai_rx_get_evidence(&fixture_device, &evidence));
+	zassert_equal(STM32_SAI_RX_FAULT_PREFIX, evidence.first_fault.reason);
+	zassert_equal(DMA_FLAG_TC, evidence.first_fault.dma_flags);
+	zassert_equal(DMA_CCR_EN, evidence.first_fault.dma_ccr);
+	fixture_cleanup();
+}
+
+ZTEST(i2s_stm32_sai_continuous_rx, test_queue_fault_has_distinct_reason)
+{
+	struct stm32_sai_rx_evidence evidence;
+	struct queue_item item = {0};
+
+	fixture_init();
+	for (uint8_t i = 0U; i < SAI_CONT_RX_NODE_COUNT; i++) {
+		zassert_ok(k_msgq_put(&fixture_data.stream.queue, &item, K_NO_WAIT));
+	}
+	fixture_callback(DMA_FLAG_HT, (uintptr_t)fixture_data.stream.continuous_blocks[1] + 4U);
+	zassert_ok(stm32_sai_rx_get_evidence(&fixture_device, &evidence));
+	zassert_equal(STM32_SAI_RX_FAULT_QUEUE, evidence.first_fault.reason);
+	zassert_equal(DMA_FLAG_HT, evidence.first_fault.dma_flags);
+	fixture_cleanup();
+}
+
+ZTEST(i2s_stm32_sai_continuous_rx, test_polled_sai_fault_is_retained_before_disable)
+{
+	struct stm32_sai_rx_evidence evidence;
+	void *block;
+	size_t size;
+
+	fixture_init();
+	fixture_sai_registers.SR = SAI_xSR_LFSDET;
+	zassert_equal(-EIO, stm32_sai_sub_read(&fixture_device, &block, &size));
+	zassert_ok(stm32_sai_rx_get_evidence(&fixture_device, &evidence));
+	zassert_equal(STM32_SAI_RX_FAULT_READ_SAI, evidence.first_fault.reason);
+	zassert_equal(SAI_xSR_LFSDET, evidence.first_fault.sai_sr);
+	zassert_equal(DMA_CCR_EN, evidence.first_fault.dma_ccr);
+	fixture_cleanup();
+}
+
+ZTEST(i2s_stm32_sai_continuous_rx, test_release_idle_fault_and_healthy_callback)
+{
+	struct stm32_sai_rx_evidence evidence;
+	void *block;
+	size_t size;
+
+	fixture_init();
+	fixture_callback(DMA_FLAG_HT, (uintptr_t)fixture_data.stream.continuous_blocks[1] + 4U);
+	zassert_ok(stm32_sai_rx_get_evidence(&fixture_device, &evidence));
+	zassert_equal(STM32_SAI_RX_FAULT_NONE, evidence.first_fault.reason);
+	zassert_ok(stm32_sai_sub_read(&fixture_device, &block, &size));
+	fixture_complete_dma_stop();
+	zassert_equal(-EIO, stm32_sai_rx_release(&fixture_device, block));
+	zassert_ok(stm32_sai_rx_get_evidence(&fixture_device, &evidence));
+	zassert_equal(STM32_SAI_RX_FAULT_RELEASE_IDLE, evidence.first_fault.reason);
+	zassert_equal(0U, evidence.first_fault.dma_ccr & DMA_CCR_EN);
+	zassert_equal(1U, evidence.first_fault.append_count);
+	fixture_cleanup();
+}
+
 #endif /* I2S_STM32_SAI_DRIVER_FIXTURE_TESTS_H_ */
