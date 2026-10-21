@@ -135,18 +135,45 @@ static void fixture_complete_dma_stop(void)
 	fixture_dma_registers.CSR |= DMA_CSR_IDLEF;
 }
 
-static void fixture_drop_and_restart_reversed(void)
+static void fixture_drop_and_restart_with_tail_alias(void)
 {
-	void *initial_blocks[SAI_CONT_RX_NODE_COUNT];
+	void *allocated[SAI_CONT_RX_NODE_COUNT];
+	void *ordered[SAI_CONT_RX_NODE_COUNT];
+	uint8_t count = 0U;
+	uint8_t lower = SAI_CONT_RX_NODE_COUNT;
+	uint8_t upper = SAI_CONT_RX_NODE_COUNT;
 
-	for (uint8_t i = 0U; i < SAI_CONT_RX_NODE_COUNT; i++) {
-		initial_blocks[i] = fixture_data.stream.continuous_blocks[i];
-	}
 	zassert_ok(stm32_sai_sub_trigger(&fixture_device, I2S_DIR_RX, I2S_TRIGGER_DROP));
+	for (uint8_t i = 0U; i < SAI_CONT_RX_NODE_COUNT; i++) {
+		zassert_ok(k_mem_slab_alloc(&fixture_slab, &allocated[i], K_NO_WAIT));
+	}
+	for (uint8_t i = 0U; i < SAI_CONT_RX_NODE_COUNT; i++) {
+		for (uint8_t j = 0U; j < SAI_CONT_RX_NODE_COUNT; j++) {
+			if ((uintptr_t)allocated[i] + 16U == (uintptr_t)allocated[j]) {
+				lower = i;
+				upper = j;
+				break;
+			}
+		}
+		if (lower != SAI_CONT_RX_NODE_COUNT) {
+			break;
+		}
+	}
+	zassert_true(lower < SAI_CONT_RX_NODE_COUNT);
+	for (uint8_t i = 0U; i < SAI_CONT_RX_NODE_COUNT; i++) {
+		if (i != lower && i != upper) {
+			ordered[count++] = allocated[i];
+		}
+	}
+	ordered[6] = allocated[upper];
+	ordered[7] = allocated[lower];
+	/* The slab is LIFO. Prepare the next START with a deterministic address alias. */
+	for (int i = SAI_CONT_RX_NODE_COUNT - 1; i >= 0; i--) {
+		k_mem_slab_free(&fixture_slab, ordered[i]);
+	}
 	zassert_ok(stm32_sai_sub_trigger(&fixture_device, I2S_DIR_RX, I2S_TRIGGER_START));
 	for (uint8_t i = 0U; i < SAI_CONT_RX_NODE_COUNT; i++) {
-		zassert_equal(initial_blocks[SAI_CONT_RX_NODE_COUNT - i - 1U],
-			      fixture_data.stream.continuous_blocks[i]);
+		zassert_equal(ordered[i], fixture_data.stream.continuous_blocks[i]);
 	}
 }
 
@@ -202,6 +229,121 @@ ZTEST(i2s_stm32_sai_continuous_rx, test_descriptor_evidence_tracks_append_and_co
 	zassert_equal(0U, evidence.append_count);
 	zassert_equal(0U, evidence.completion_callbacks);
 	zassert_equal(0U, evidence.max_callback_gap_cycles);
+	fixture_cleanup();
+}
+
+ZTEST(i2s_stm32_sai_continuous_rx, test_deferred_boundary_is_visible_without_a_fault)
+{
+	struct stm32_sai_rx_evidence evidence;
+
+	fixture_init();
+	fixture_dma_registers.CBR1 = 123U;
+	fixture_dma_registers.CLLR = 0x40U;
+	fixture_callback(DMA_FLAG_TC, (uintptr_t)fixture_data.stream.continuous_blocks[0]);
+	zassert_ok(stm32_sai_rx_get_evidence(&fixture_device, &evidence));
+	zassert_equal(STM32_SAI_RX_FAULT_NONE, evidence.first_fault.reason);
+	zassert_equal(1U, evidence.raw_callback_count);
+	zassert_equal(1U, evidence.defer_callback_count);
+	zassert_equal(0U, evidence.completion_count);
+	zassert_equal(0U, evidence.live.queue_depth);
+	zassert_equal(I2S_STATE_RUNNING, evidence.live.stream_state);
+	zassert_equal(DMA_CCR_EN, evidence.live.dma_ccr);
+	zassert_equal(123U, evidence.live.dma_cbr1);
+	zassert_equal(0x40U, evidence.live.dma_cllr);
+	zassert_true(evidence.cycle_clock_hz > 0U);
+
+	fixture_callback(DMA_FLAG_HT, (uintptr_t)fixture_data.stream.continuous_blocks[1] + 4U);
+	zassert_ok(stm32_sai_rx_get_evidence(&fixture_device, &evidence));
+	zassert_equal(2U, evidence.raw_callback_count);
+	zassert_equal(1U, evidence.defer_callback_count);
+	zassert_equal(1U, evidence.completion_count);
+	zassert_equal(1U, evidence.live.queue_depth);
+	fixture_cleanup();
+}
+
+ZTEST(i2s_stm32_sai_continuous_rx, test_timed_callbacks_reset_after_quiesce_and_restart)
+{
+	struct i2s_config continuous = fixture_continuous_config();
+	struct stm32_sai_rx_evidence evidence;
+
+	fixture_empty_init();
+	zassert_ok(stm32_sai_sub_conf(&fixture_device, I2S_DIR_RX, &continuous));
+	zassert_ok(stm32_sai_sub_trigger(&fixture_device, I2S_DIR_RX, I2S_TRIGGER_START));
+	zassert_true(fixture_data.stream.continuous_timing_active);
+	fixture_callback(DMA_FLAG_TC, (uintptr_t)fixture_data.stream.continuous_blocks[1] + 4U);
+	zassert_ok(stm32_sai_rx_get_evidence(&fixture_device, &evidence));
+	zassert_equal(1U, evidence.rx_epoch);
+	zassert_equal(1U, evidence.raw_callback_count);
+	zassert_equal(1U, evidence.callback_timing_count);
+	zassert_true(evidence.callback_timing_hz > 0U);
+	zassert_true(evidence.callback_max_cpu_cycles <= evidence.callback_total_cpu_cycles);
+	zassert_ok(stm32_sai_sub_trigger(&fixture_device, I2S_DIR_RX, I2S_TRIGGER_DROP));
+	zassert_false(fixture_data.stream.continuous_timing_active);
+	zassert_ok(stm32_sai_sub_trigger(&fixture_device, I2S_DIR_RX, I2S_TRIGGER_START));
+	zassert_ok(stm32_sai_rx_get_evidence(&fixture_device, &evidence));
+	zassert_equal(2U, evidence.rx_epoch);
+	zassert_equal(0U, evidence.raw_callback_count);
+	zassert_equal(0U, evidence.callback_timing_count);
+	zassert_ok(stm32_sai_sub_trigger(&fixture_device, I2S_DIR_RX, I2S_TRIGGER_DROP));
+	fixture_cleanup();
+}
+
+ZTEST(i2s_stm32_sai_continuous_rx, test_quiesce_clears_pending_flags_and_late_callback)
+{
+	struct i2s_config continuous = fixture_continuous_config();
+	struct stm32_sai_rx_evidence evidence;
+	uintptr_t old_destination;
+
+	fixture_empty_init();
+	zassert_ok(stm32_sai_sub_conf(&fixture_device, I2S_DIR_RX, &continuous));
+	zassert_ok(stm32_sai_sub_trigger(&fixture_device, I2S_DIR_RX, I2S_TRIGGER_START));
+	old_destination = (uintptr_t)fixture_data.stream.continuous_blocks[1] + 4U;
+	fixture_data.hdma.flags = DMA_FLAG_TC | DMA_FLAG_HT;
+	zassert_ok(stm32_sai_sub_trigger(&fixture_device, I2S_DIR_RX, I2S_TRIGGER_DROP));
+	zassert_equal(0U, fixture_data.hdma.flags & (DMA_FLAG_TC | DMA_FLAG_HT));
+	fixture_callback(DMA_FLAG_TC | DMA_FLAG_HT, old_destination);
+	zassert_ok(stm32_sai_rx_get_evidence(&fixture_device, &evidence));
+	zassert_equal(1U, evidence.raw_callback_count);
+	zassert_equal(0U, evidence.completion_count);
+	zassert_equal(0U, evidence.live.queue_depth);
+	zassert_equal(0U, fixture_data.hdma.flags & (DMA_FLAG_TC | DMA_FLAG_HT));
+	zassert_ok(stm32_sai_sub_trigger(&fixture_device, I2S_DIR_RX, I2S_TRIGGER_START));
+	zassert_ok(stm32_sai_rx_get_evidence(&fixture_device, &evidence));
+	zassert_equal(2U, evidence.rx_epoch);
+	zassert_equal(0U, evidence.raw_callback_count);
+	zassert_equal(0U, evidence.completion_count);
+	zassert_equal(0U, evidence.live.queue_depth);
+	zassert_ok(stm32_sai_sub_trigger(&fixture_device, I2S_DIR_RX, I2S_TRIGGER_DROP));
+	fixture_cleanup();
+}
+
+ZTEST(i2s_stm32_sai_continuous_rx, test_borrowed_buffer_keeps_finite_tail_unlinked)
+{
+	struct i2s_config continuous = fixture_continuous_config();
+	uint8_t first_bytes[32];
+	void *borrowed;
+	size_t size;
+
+	/* Seven remaining blocks take less than a 100 ms hold at 384 kHz. */
+	zassert_true((7U * 4096U * 1000U) / 384U < 100000U);
+	fixture_empty_init();
+	zassert_ok(stm32_sai_sub_conf(&fixture_device, I2S_DIR_RX, &continuous));
+	zassert_ok(stm32_sai_sub_trigger(&fixture_device, I2S_DIR_RX, I2S_TRIGGER_START));
+	zassert_equal(0U, fixture_data.stream.continuous_tail->LinkRegisters[5]);
+	fixture_callback(DMA_FLAG_TC, (uintptr_t)fixture_data.stream.continuous_blocks[1] + 4U);
+	zassert_ok(stm32_sai_sub_read(&fixture_device, &borrowed, &size));
+	zassert_equal(fixture_data.stream.continuous_blocks[0], borrowed);
+	memcpy(first_bytes, borrowed, sizeof(first_bytes));
+	for (uint8_t i = 1U; i < SAI_CONT_RX_NODE_COUNT - 1U; i++) {
+		memset(fixture_data.stream.continuous_blocks[i], i, 32U);
+		fixture_callback(DMA_FLAG_TC,
+				 (uintptr_t)fixture_data.stream.continuous_blocks[i + 1U] + 4U);
+	}
+	zassert_equal(SAI_CONT_RX_NODE_BORROWED, fixture_data.stream.continuous_node_state[0]);
+	zassert_equal(0U, fixture_data.stream.continuous_tail->LinkRegisters[5]);
+	zassert_mem_equal(first_bytes, borrowed, sizeof(first_bytes));
+	zassert_ok(stm32_sai_sub_trigger(&fixture_device, I2S_DIR_RX, I2S_TRIGGER_DROP));
+	zassert_ok(stm32_sai_rx_release(&fixture_device, borrowed));
 	fixture_cleanup();
 }
 
@@ -310,7 +452,7 @@ ZTEST(i2s_stm32_sai_continuous_rx, test_stop_alias_fails_safe_without_terminal_p
 	uintptr_t tail_end;
 
 	fixture_init();
-	fixture_drop_and_restart_reversed();
+	fixture_drop_and_restart_with_tail_alias();
 	tail_end = (uintptr_t)fixture_data.stream.continuous_blocks[7] + 16U;
 	fixture_publish_prior_tail_blocks_and_request_stop(&borrowed);
 	zassert_equal((uintptr_t)fixture_data.stream.continuous_blocks[6], tail_end);
@@ -340,7 +482,7 @@ ZTEST(i2s_stm32_sai_continuous_rx, test_stop_alias_publishes_only_remaining_tail
 	uint32_t queue_depth;
 
 	fixture_init();
-	fixture_drop_and_restart_reversed();
+	fixture_drop_and_restart_with_tail_alias();
 	tail_end = (uintptr_t)fixture_data.stream.continuous_blocks[7] + 16U;
 	fixture_publish_prior_tail_blocks_and_request_stop(&borrowed);
 	zassert_equal((uintptr_t)fixture_data.stream.continuous_blocks[6], tail_end);
@@ -363,7 +505,7 @@ ZTEST(i2s_stm32_sai_continuous_rx, test_repeated_terminal_callback_with_all_owne
 	uintptr_t tail_end;
 
 	fixture_init();
-	fixture_drop_and_restart_reversed();
+	fixture_drop_and_restart_with_tail_alias();
 	tail_end = (uintptr_t)fixture_data.stream.continuous_blocks[7] + 16U;
 	fixture_publish_prior_tail_blocks_and_request_stop(&borrowed);
 	fixture_complete_dma_stop();
@@ -809,10 +951,13 @@ ZTEST(i2s_stm32_sai_continuous_rx, test_polled_sai_fault_is_retained_before_disa
 
 	fixture_init();
 	fixture_sai_registers.SR = SAI_xSR_LFSDET;
+	fixture_data.hdma.flags = DMA_FLAG_DTE;
 	zassert_equal(-EIO, stm32_sai_sub_read(&fixture_device, &block, &size));
 	zassert_ok(stm32_sai_rx_get_evidence(&fixture_device, &evidence));
 	zassert_equal(STM32_SAI_RX_FAULT_READ_SAI, evidence.first_fault.reason);
 	zassert_equal(SAI_xSR_LFSDET, evidence.first_fault.sai_sr);
+	zassert_equal(DMA_FLAG_DTE, evidence.first_fault.dma_flags);
+	zassert_equal(DMA_CSR_IDLEF, evidence.first_fault.dma_csr);
 	zassert_equal(DMA_CCR_EN, evidence.first_fault.dma_ccr);
 	fixture_cleanup();
 }

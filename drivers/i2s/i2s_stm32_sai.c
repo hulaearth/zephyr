@@ -16,6 +16,10 @@
 #include <zephyr/drivers/clock_control.h>
 #include <zephyr/drivers/pinctrl.h>
 #include <zephyr/cache.h>
+#include <zephyr/sys/clock.h>
+#if defined(CONFIG_TIMING_FUNCTIONS)
+#include <zephyr/timing/timing.h>
+#endif
 
 #include <stm32_ll_dma.h>
 #include <stm32_bitops.h>
@@ -56,6 +60,9 @@ struct queue_item {
 #define SAI_CONT_RX_NODE_BORROWED 3U
 #define SAI_CONT_RX_LINK_UPDATE_MASK \
 	(DMA_CLLR_UT1 | DMA_CLLR_UT2 | DMA_CLLR_UB1 | DMA_CLLR_USA | DMA_CLLR_UDA | DMA_CLLR_ULL)
+#define SAI_CONT_RX_DMA_FLAG_MASK                                                                  \
+	(DMA_FLAG_TC | DMA_FLAG_HT | DMA_FLAG_DTE | DMA_FLAG_ULE | DMA_FLAG_USE | DMA_FLAG_TO |    \
+	 DMA_FLAG_SUSP)
 
 struct sai_continuous_node_storage {
 	DMA_NodeTypeDef node;
@@ -125,6 +132,19 @@ struct stream {
 	uint32_t continuous_max_callback_gap_cycles;
 	uint32_t continuous_last_callback_cycle;
 	bool continuous_callback_cycle_valid;
+	uint32_t continuous_rx_epoch;
+	uint32_t continuous_start_cycle;
+	uint32_t continuous_start_uptime_ms;
+	uint32_t continuous_raw_callback_count;
+	uint32_t continuous_defer_callback_count;
+	uint32_t continuous_last_raw_callback_cycle;
+#if defined(CONFIG_TIMING_FUNCTIONS)
+	bool continuous_timing_active;
+	uint64_t continuous_callback_total_cpu_cycles;
+	uint64_t continuous_callback_max_cpu_cycles;
+	uint32_t continuous_callback_timing_count;
+	uint64_t continuous_callback_timing_hz;
+#endif
 #endif
 };
 
@@ -517,6 +537,20 @@ static void continuous_rx_latch_fault(struct stm32_sai_sub_data *sub_data,
 	}
 	irq_unlock(key);
 }
+
+#if defined(CONFIG_TIMING_FUNCTIONS)
+static void continuous_rx_note_callback_time(struct stream *stream, timing_t start)
+{
+	timing_t end = timing_counter_get();
+	uint64_t cycles = timing_cycles_get(&start, &end);
+
+	stream->continuous_callback_total_cpu_cycles += cycles;
+	if (cycles > stream->continuous_callback_max_cpu_cycles) {
+		stream->continuous_callback_max_cpu_cycles = cycles;
+	}
+	stream->continuous_callback_timing_count++;
+}
+#endif
 #endif
 
 static void dma_callback(const struct device *dma_dev, void *arg, uint32_t channel, int status)
@@ -528,14 +562,24 @@ static void dma_callback(const struct device *dma_dev, void *arg, uint32_t chann
 	struct stm32_sai_sub_data *sub_data = CONTAINER_OF(hdma, struct stm32_sai_sub_data, hdma);
 	struct stream *stream = &sub_data->stream;
 	if (stream->continuous_rx) {
-		uint32_t flags = __HAL_DMA_GET_FLAG(hdma, DMA_FLAG_TC | DMA_FLAG_HT | DMA_FLAG_DTE |
-						 DMA_FLAG_ULE | DMA_FLAG_USE | DMA_FLAG_TO | DMA_FLAG_SUSP);
+		uint32_t raw_cycle = k_cycle_get_32();
+		uint32_t flags = __HAL_DMA_GET_FLAG(hdma, SAI_CONT_RX_DMA_FLAG_MASK);
+#if defined(CONFIG_TIMING_FUNCTIONS)
+		timing_t timing_start_cycle = 0;
+		bool timed = stream->continuous_timing_active;
+
+		if (timed) {
+			timing_start_cycle = timing_counter_get();
+		}
+#endif
+		stream->continuous_raw_callback_count++;
+		stream->continuous_last_raw_callback_cycle = raw_cycle;
 		if (stream->state != I2S_STATE_RUNNING &&
 		    !(stream->state == I2S_STATE_STOPPING && stream->continuous_stop_pending)) {
 			if (flags != 0U) {
 				__HAL_DMA_CLEAR_FLAG(hdma, flags);
 			}
-			return;
+			goto continuous_done;
 		}
 		uint32_t sai_errors = sub_data->hsai.Instance->SR &
 			(SAI_xSR_OVRUDR | SAI_xSR_WCKCFG | SAI_xSR_AFSDET | SAI_xSR_LFSDET);
@@ -552,10 +596,10 @@ static void dma_callback(const struct device *dma_dev, void *arg, uint32_t chann
 			stream->state = I2S_STATE_ERROR;
 			__HAL_DMA_DISABLE(hdma);
 			sub_data->hsai.Instance->CR1 &= ~(SAI_xCR1_DMAEN | SAI_xCR1_SAIEN);
-			return;
+			goto continuous_done;
 		}
 		if (tc == 0U && ht == 0U) {
-			return;
+			goto continuous_done;
 		}
 		__HAL_DMA_CLEAR_FLAG(hdma, tc | ht);
 		uintptr_t current = hdma->Instance->CDAR;
@@ -651,7 +695,8 @@ static void dma_callback(const struct device *dma_dev, void *arg, uint32_t chann
 				&publish_count);
 		}
 		if (plan == SAI_RX_PREFIX_DEFER) {
-			return;
+			stream->continuous_defer_callback_count++;
+			goto continuous_done;
 		}
 		if (plan != SAI_RX_PREFIX_READY) {
 			continuous_rx_latch_fault(sub_data, STM32_SAI_RX_FAULT_PREFIX, -EIO, flags);
@@ -659,7 +704,7 @@ static void dma_callback(const struct device *dma_dev, void *arg, uint32_t chann
 			stream->state = I2S_STATE_ERROR;
 			__HAL_DMA_DISABLE(hdma);
 			sub_data->hsai.Instance->CR1 &= ~(SAI_xCR1_DMAEN | SAI_xCR1_SAIEN);
-			return;
+			goto continuous_done;
 		}
 		uint32_t callback_cycle = k_cycle_get_32();
 
@@ -688,7 +733,7 @@ static void dma_callback(const struct device *dma_dev, void *arg, uint32_t chann
 				stream->continuous_fault = true;
 				stream->state = I2S_STATE_ERROR;
 				__HAL_DMA_DISABLE(hdma);
-				return;
+				goto continuous_done;
 			}
 			stream->continuous_node_state[i] = SAI_CONT_RX_NODE_QUEUED;
 			stream->continuous_completion_count++;
@@ -722,6 +767,12 @@ static void dma_callback(const struct device *dma_dev, void *arg, uint32_t chann
 			stream->continuous_stop_target_complete = false;
 			stream->state = I2S_STATE_READY;
 		}
+continuous_done:
+#if defined(CONFIG_TIMING_FUNCTIONS)
+		if (timed) {
+			continuous_rx_note_callback_time(stream, timing_start_cycle);
+		}
+#endif
 		return;
 	}
 #endif
@@ -1113,8 +1164,10 @@ static int stm32_sai_sub_read(const struct device *dev, void **mem_block, size_t
 			uint32_t sai_status = sub_data->hsai.Instance->SR &
 				(SAI_xSR_OVRUDR | SAI_xSR_WCKCFG | SAI_xSR_AFSDET | SAI_xSR_LFSDET);
 			if (sai_status != 0U) {
-				continuous_rx_latch_fault(sub_data, STM32_SAI_RX_FAULT_READ_SAI,
-							  ret, sub_data->hdma.Instance->CSR);
+				continuous_rx_latch_fault(
+					sub_data, STM32_SAI_RX_FAULT_READ_SAI, ret,
+					__HAL_DMA_GET_FLAG(&sub_data->hdma,
+							   SAI_CONT_RX_DMA_FLAG_MASK));
 				stream->continuous_fault = true;
 				stream->state = I2S_STATE_ERROR;
 				__HAL_DMA_DISABLE(&sub_data->hdma);
@@ -1143,8 +1196,9 @@ static int stm32_sai_sub_read(const struct device *dev, void **mem_block, size_t
 			}
 		}
 		if (!found) {
-			continuous_rx_latch_fault(sub_data, STM32_SAI_RX_FAULT_READ_OWNER, -EIO,
-						  sub_data->hdma.Instance->CSR);
+			continuous_rx_latch_fault(
+				sub_data, STM32_SAI_RX_FAULT_READ_OWNER, -EIO,
+				__HAL_DMA_GET_FLAG(&sub_data->hdma, SAI_CONT_RX_DMA_FLAG_MASK));
 			stream->continuous_fault = true;
 			stream->state = I2S_STATE_ERROR;
 			return -EIO;
@@ -1193,6 +1247,9 @@ static int continuous_rx_start(const struct device *dev)
 	unsigned int key = irq_lock();
 
 	memset(&stream->continuous_first_fault, 0, sizeof(stream->continuous_first_fault));
+	stream->continuous_rx_epoch++;
+	stream->continuous_start_cycle = k_cycle_get_32();
+	stream->continuous_start_uptime_ms = k_uptime_get_32();
 	stream->continuous_append_count = 0U;
 	stream->continuous_append_readback_failures = 0U;
 	stream->continuous_appended_completions = 0U;
@@ -1203,6 +1260,15 @@ static int continuous_rx_start(const struct device *dev)
 	stream->continuous_max_callback_gap_cycles = 0U;
 	stream->continuous_last_callback_cycle = 0U;
 	stream->continuous_callback_cycle_valid = false;
+	stream->continuous_raw_callback_count = 0U;
+	stream->continuous_defer_callback_count = 0U;
+	stream->continuous_last_raw_callback_cycle = 0U;
+#if defined(CONFIG_TIMING_FUNCTIONS)
+	stream->continuous_callback_total_cpu_cycles = 0U;
+	stream->continuous_callback_max_cpu_cycles = 0U;
+	stream->continuous_callback_timing_count = 0U;
+	stream->continuous_callback_timing_hz = 0U;
+#endif
 	irq_unlock(key);
 	stream->continuous_fault = false;
 	stream->continuous_quiesced = false;
@@ -1218,7 +1284,7 @@ static int continuous_rx_start(const struct device *dev)
 	hdma->InitLinkedList.LinkAllocatedPort = DMA_LINK_ALLOCATED_PORT1;
 	if (HAL_DMAEx_List_Init(hdma) != HAL_OK) {
 		continuous_rx_latch_fault(sub_data, STM32_SAI_RX_FAULT_START, -EIO,
-					  hdma->Instance->CSR);
+					  __HAL_DMA_GET_FLAG(hdma, SAI_CONT_RX_DMA_FLAG_MASK));
 		stream->continuous_fault = true;
 		stream->state = I2S_STATE_ERROR;
 		return -EIO;
@@ -1280,10 +1346,17 @@ static int continuous_rx_start(const struct device *dev)
 	hdma->XferCpltCallback = NULL;
 	hdma->XferErrorCallback = NULL;
 	hdma->XferSuspendCallback = NULL;
+	/* The timing subsystem owns the CPU counter. Keep one reference until DMA quiesces. */
+#if defined(CONFIG_TIMING_FUNCTIONS)
+	timing_init();
+	timing_start();
+	stream->continuous_timing_active = true;
+	stream->continuous_callback_timing_hz = timing_freq_get();
+#endif
 	__DSB();
 	if (HAL_DMAEx_List_Start_IT(hdma) != HAL_OK) {
 		continuous_rx_latch_fault(sub_data, STM32_SAI_RX_FAULT_START, -EIO,
-					  hdma->Instance->CSR);
+					  __HAL_DMA_GET_FLAG(hdma, SAI_CONT_RX_DMA_FLAG_MASK));
 		if ((hdma->Instance->CCR & DMA_CCR_EN) != 0U) {
 			stream->continuous_fault = true;
 			stream->state = I2S_STATE_ERROR;
@@ -1300,12 +1373,19 @@ static int continuous_rx_start(const struct device *dev)
 	return 0;
 
 free_blocks:
-	continuous_rx_latch_fault(sub_data, STM32_SAI_RX_FAULT_START, -EIO, hdma->Instance->CSR);
+	continuous_rx_latch_fault(sub_data, STM32_SAI_RX_FAULT_START, -EIO,
+				  __HAL_DMA_GET_FLAG(hdma, SAI_CONT_RX_DMA_FLAG_MASK));
 	if (HAL_DMAEx_List_DeInit(hdma) != HAL_OK) {
 		stream->continuous_fault = true;
 		stream->state = I2S_STATE_ERROR;
 		return -EIO;
 	}
+#if defined(CONFIG_TIMING_FUNCTIONS)
+	if (stream->continuous_timing_active) {
+		timing_stop();
+		stream->continuous_timing_active = false;
+	}
+#endif
 	for (uint8_t i = 0U; i < SAI_CONT_RX_NODE_COUNT; i++) {
 		if (stream->continuous_blocks[i] != NULL) {
 			k_mem_slab_free(stream->i2s_cfg.mem_slab, stream->continuous_blocks[i]);
@@ -1333,8 +1413,9 @@ static int continuous_rx_quiesce(const struct device *dev, bool preserve_queue)
 		__HAL_DMA_DISABLE_IT(hdma, interrupt_mask);
 		if ((hdma->Instance->CCR & DMA_CCR_EN) != 0U) {
 			if (HAL_SAI_DMAStop(hsai) != HAL_OK) {
-				continuous_rx_latch_fault(sub_data, STM32_SAI_RX_FAULT_QUIESCE,
-							  -EIO, hdma->Instance->CSR);
+				continuous_rx_latch_fault(
+					sub_data, STM32_SAI_RX_FAULT_QUIESCE, -EIO,
+					__HAL_DMA_GET_FLAG(hdma, SAI_CONT_RX_DMA_FLAG_MASK));
 				stream->state = I2S_STATE_ERROR;
 				stream->continuous_fault = true;
 				return -EIO;
@@ -1343,8 +1424,9 @@ static int continuous_rx_quiesce(const struct device *dev, bool preserve_queue)
 			hsai->Instance->CR1 &= ~SAI_xCR1_DMAEN;
 			__HAL_SAI_DISABLE(hsai);
 			if ((hsai->Instance->CR1 & SAI_xCR1_SAIEN) != 0U) {
-				continuous_rx_latch_fault(sub_data, STM32_SAI_RX_FAULT_QUIESCE,
-							  -EIO, hdma->Instance->CSR);
+				continuous_rx_latch_fault(
+					sub_data, STM32_SAI_RX_FAULT_QUIESCE, -EIO,
+					__HAL_DMA_GET_FLAG(hdma, SAI_CONT_RX_DMA_FLAG_MASK));
 				stream->state = I2S_STATE_ERROR;
 				stream->continuous_fault = true;
 				return -EIO;
@@ -1355,14 +1437,21 @@ static int continuous_rx_quiesce(const struct device *dev, bool preserve_queue)
 		    (hsai->Instance->CR1 & SAI_xCR1_SAIEN) != 0U ||
 		    (hdma->Instance->CSR & DMA_CSR_IDLEF) == 0U ||
 		    HAL_DMAEx_List_DeInit(hdma) != HAL_OK) {
-			continuous_rx_latch_fault(sub_data, STM32_SAI_RX_FAULT_QUIESCE, -EIO,
-						  hdma->Instance->CSR);
+			continuous_rx_latch_fault(
+				sub_data, STM32_SAI_RX_FAULT_QUIESCE, -EIO,
+				__HAL_DMA_GET_FLAG(hdma, SAI_CONT_RX_DMA_FLAG_MASK));
 			stream->state = I2S_STATE_ERROR;
 			stream->continuous_fault = true;
 			return -EIO;
 		}
 		__HAL_DMA_CLEAR_FLAG(hdma, flag_mask);
 	}
+#if defined(CONFIG_TIMING_FUNCTIONS)
+	if (stream->continuous_timing_active) {
+		timing_stop();
+		stream->continuous_timing_active = false;
+	}
+#endif
 	stream->continuous_quiesced = true;
 	stream->continuous_stop_pending = false;
 	stream->continuous_stop_target_complete = false;
@@ -1570,8 +1659,9 @@ int stm32_sai_rx_release(const struct device *dev, void *buffer)
 		stream->continuous_append_readback_failures++;
 	}
 	if ((sub_data->hdma.Instance->CCR & DMA_CCR_EN) == 0U) {
-		continuous_rx_latch_fault(sub_data, STM32_SAI_RX_FAULT_RELEASE_IDLE, -EIO,
-					  sub_data->hdma.Instance->CSR);
+		continuous_rx_latch_fault(
+			sub_data, STM32_SAI_RX_FAULT_RELEASE_IDLE, -EIO,
+			__HAL_DMA_GET_FLAG(&sub_data->hdma, SAI_CONT_RX_DMA_FLAG_MASK));
 		stream->continuous_tail->LinkRegisters[5] = 0U;
 		__DSB();
 		stream->continuous_fault = true;
@@ -1592,6 +1682,8 @@ int stm32_sai_rx_get_evidence(const struct device *dev, struct stm32_sai_rx_evid
 {
 	struct stm32_sai_sub_data *sub_data;
 	struct stream *stream;
+	DMA_HandleTypeDef *hdma;
+	SAI_HandleTypeDef *hsai;
 	unsigned int key;
 
 	if (dev == NULL || evidence == NULL) {
@@ -1599,12 +1691,35 @@ int stm32_sai_rx_get_evidence(const struct device *dev, struct stm32_sai_rx_evid
 	}
 	sub_data = dev->data;
 	stream = &sub_data->stream;
+	hdma = &sub_data->hdma;
+	hsai = &sub_data->hsai;
 	if (!stream->continuous_rx) {
 		return -ENOTSUP;
 	}
 	key = irq_lock();
 	*evidence = (struct stm32_sai_rx_evidence){
 		.first_fault = stream->continuous_first_fault,
+		.live =
+			(struct stm32_sai_rx_live){
+				.sample_cycle = k_cycle_get_32(),
+				.sample_uptime_ms = k_uptime_get_32(),
+				.stream_state = stream->state,
+				.queue_depth = k_msgq_num_used_get(&stream->queue),
+				.next_complete = stream->continuous_next_complete,
+				.next_release = stream->continuous_next_release,
+				.dma_flags = __HAL_DMA_GET_FLAG(hdma, SAI_CONT_RX_DMA_FLAG_MASK),
+				.dma_ccr = hdma->Instance->CCR,
+				.dma_csr = hdma->Instance->CSR,
+				.dma_cbr1 = hdma->Instance->CBR1,
+				.dma_cdar = hdma->Instance->CDAR,
+				.dma_cllr = hdma->Instance->CLLR,
+				.sai_cr1 = hsai->Instance->CR1,
+				.sai_sr = hsai->Instance->SR,
+			},
+		.rx_epoch = stream->continuous_rx_epoch,
+		.start_cycle = stream->continuous_start_cycle,
+		.start_uptime_ms = stream->continuous_start_uptime_ms,
+		.cycle_clock_hz = sys_clock_hw_cycles_per_sec(),
 		.append_count = stream->continuous_append_count,
 		.append_readback_failures = stream->continuous_append_readback_failures,
 		.appended_completions = stream->continuous_appended_completions,
@@ -1612,7 +1727,20 @@ int stm32_sai_rx_get_evidence(const struct device *dev, struct stm32_sai_rx_evid
 		.completion_callbacks = stream->continuous_completion_callbacks,
 		.coalesced_callbacks = stream->continuous_coalesced_callbacks,
 		.max_callback_gap_cycles = stream->continuous_max_callback_gap_cycles,
+		.raw_callback_count = stream->continuous_raw_callback_count,
+		.defer_callback_count = stream->continuous_defer_callback_count,
+		.last_raw_callback_cycle = stream->continuous_last_raw_callback_cycle,
+#if defined(CONFIG_TIMING_FUNCTIONS)
+		.callback_total_cpu_cycles = stream->continuous_callback_total_cpu_cycles,
+		.callback_max_cpu_cycles = stream->continuous_callback_max_cpu_cycles,
+		.callback_timing_count = stream->continuous_callback_timing_count,
+		.callback_timing_hz = stream->continuous_callback_timing_hz,
+#endif
 	};
+	for (uint8_t i = 0U; i < SAI_CONT_RX_NODE_COUNT; i++) {
+		evidence->live.node_states |= (uint32_t)stream->continuous_node_state[i]
+					      << (2U * i);
+	}
 	irq_unlock(key);
 	return 0;
 }

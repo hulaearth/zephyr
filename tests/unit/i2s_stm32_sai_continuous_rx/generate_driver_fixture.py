@@ -9,6 +9,7 @@ import sys
 
 FUNCTIONS = (
     ("static void continuous_rx_latch_fault", "continuous_rx_latch_fault"),
+    ("static void continuous_rx_note_callback_time", "continuous_rx_note_callback_time"),
     ("static void dma_callback", "dma_callback"),
     ("static int continuous_rx_start", "continuous_rx_start"),
     ("static int continuous_rx_quiesce", "continuous_rx_quiesce"),

@@ -18,8 +18,12 @@
 #include <zephyr/drivers/dma.h>
 #include <zephyr/device.h>
 #include <zephyr/sys/atomic.h>
+#include <zephyr/sys/clock.h>
 #include <zephyr/sys/util.h>
 #include <zephyr/ztest.h>
+#if defined(CONFIG_TIMING_FUNCTIONS)
+#include <zephyr/timing/timing.h>
+#endif
 
 #include "i2s_stm32_sai_rx_ring.h"
 
@@ -34,6 +38,9 @@ static int continuous_rx_quiesce(const struct device *dev, bool preserve_queue);
 #define SAI_CONT_RX_NODE_QUEUED 2U
 #define SAI_CONT_RX_NODE_BORROWED 3U
 #define SAI_CONT_RX_LINK_UPDATE_MASK 0x3fU
+#define SAI_CONT_RX_DMA_FLAG_MASK                                                                  \
+	(DMA_FLAG_TC | DMA_FLAG_HT | DMA_FLAG_DTE | DMA_FLAG_ULE | DMA_FLAG_USE | DMA_FLAG_TO |    \
+	 DMA_FLAG_SUSP)
 
 #define DMA_FLAG_TC BIT(0)
 #define DMA_FLAG_HT BIT(1)
@@ -304,6 +311,17 @@ struct stream {
 	uint32_t continuous_max_callback_gap_cycles;
 	uint32_t continuous_last_callback_cycle;
 	bool continuous_callback_cycle_valid;
+	uint32_t continuous_rx_epoch;
+	uint32_t continuous_start_cycle;
+	uint32_t continuous_start_uptime_ms;
+	uint32_t continuous_raw_callback_count;
+	uint32_t continuous_defer_callback_count;
+	uint32_t continuous_last_raw_callback_cycle;
+	bool continuous_timing_active;
+	uint64_t continuous_callback_total_cpu_cycles;
+	uint64_t continuous_callback_max_cpu_cycles;
+	uint32_t continuous_callback_timing_count;
+	uint64_t continuous_callback_timing_hz;
 };
 
 struct stm32_sai_sub_data {
