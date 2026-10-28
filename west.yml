@@ -172,7 +172,7 @@ manifest:
       groups:
         - hal
     - name: hal_espressif
-      revision: c1e43fdd850d36c799d09295d10e0bc569b3f725
+      revision: cc81db00233af6020f2fea9fbb0d0098fb3d0d86
       path: modules/hal/espressif
       west-commands: west/west-commands.yml
       groups:
@@ -188,7 +188,7 @@ manifest:
       groups:
         - hal
     - name: hal_infineon
-      revision: 2191db4d7723737ffd3d59d01b50f7595dac2944
+      revision: eae914ed1ad0b54af28191d13da9b8e98fb5cb2b
       path: modules/hal/infineon
       groups:
         - hal
@@ -330,7 +330,7 @@ manifest:
       groups:
         - crypto
     - name: mcuboot
-      revision: e19ad039b4864a2a49883c8279e4a24abbbcfe84
+      revision: 725d63c9d5bc1bb572d802e7a768daf504186daf
       path: bootloader/mcuboot
       groups:
         - bootloader

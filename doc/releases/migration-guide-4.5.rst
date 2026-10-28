@@ -197,6 +197,10 @@ Boards
   <REGULATOR_RPI_PICO_MODE_NORMAL>`` properties are now set by default in the SoC dtsi. Boards
   that previously set them explicitly can remove those lines. (:github:`114751`)
 
+* On RP2040, the ``mbox`` node was split into ``mbox0`` and ``mbox1`` to provide
+  per-core mailbox instances. The ``ipm_mbox`` node was renamed to ``ipm_mbox0`` and
+  ``ipm_mbox1``, respectively.
+
 * On RP2350 (rpi_pico family), the ``hazard3`` and ``m33`` cpucluster qualifiers are deprecated in
   favor of ``hazard3_0`` and ``m33_0``, which explicitly identify the cluster as CPU0 and pave the
   way for dual-core support. All in-tree RP2350 boards have been migrated to the new qualifiers
@@ -221,8 +225,8 @@ Boards
   populated the Kconfig values). If either option is manually adjusted, it will cause
   :kconfig:option:`CONFIG_SRAM_DEPRECATED_KCONFIG_SET` to be set which indicates this deprecation.
 
-* The internal Nordic SoC platform Kconfig symbols ``NRF_PLATFORM_HALTIUM``
-  and ``NRF_PLATFORM_LUMOS`` are no longer used by in-tree code, which now
+* The internal Nordic SoC platform Kconfig symbols ``CONFIG_NRF_PLATFORM_HALTIUM``
+  and ``CONFIG_NRF_PLATFORM_LUMOS`` are no longer used by in-tree code, which now
   relies on explicit :kconfig:option:`CONFIG_SOC_SERIES_NRF54H`,
   :kconfig:option:`CONFIG_SOC_SERIES_NRF92`,
   :kconfig:option:`CONFIG_SOC_SERIES_NRF54L` and
@@ -233,10 +237,10 @@ Boards
   building with a Kconfig deprecation warning. Out-of-tree Kconfig, CMake and code using these
   symbols should be updated:
 
-  * The ``CONFIG_NRF_PLATFORM_HALTIUM`` with
+  * ``CONFIG_NRF_PLATFORM_HALTIUM`` with
     :kconfig:option:`CONFIG_SOC_SERIES_NRF54H` or
     :kconfig:option:`CONFIG_SOC_SERIES_NRF92`.
-  * The ``CONFIG_NRF_PLATFORM_LUMOS`` with
+  * ``CONFIG_NRF_PLATFORM_LUMOS`` with
     :kconfig:option:`CONFIG_SOC_SERIES_NRF54L` or
     :kconfig:option:`CONFIG_SOC_SERIES_NRF71`.
 
@@ -458,6 +462,12 @@ Boards
   See :ref:`migration_4_5_mspi_stm32` for the migration and deprecation timeline,
   and the required configuration changes.
 
+* The GD32F4xx SoC device-tree files ``gd32f405vg.dtsi`` and
+  ``gd32f470ik.dtsi`` have been renamed to ``gd32f405xg.dtsi`` and
+  ``gd32f470xk.dtsi``.
+
+* On GD32L233RC, the ``sram`` node label has been replaced by ``sram0``.
+
 Device Drivers and Devicetree
 *****************************
 
@@ -613,27 +623,26 @@ Clock control nrf deprecation
 
    #. Rename the following Kconfig options:
 
-      * Replace :kconfig:option:`CONFIG_NRFX_CLOCK_USE_LFRC_CALIBRATION` with :kconfig:option:`CONFIG_NRFX_CLOCK_LFCLK_USE_LFRC_CALIBRATION`.
       * Replace :kconfig:option:`CONFIG_NRFX_CLOCK_LF_CAL_ENABLED` with :kconfig:option:`CONFIG_CLOCK_CONTROL_NRF_K32SRC_RC_CALIBRATION`.
 
    #. Move the following Kconfig options to the ``nordic,nrf-clock-lfclk`` devicetree node:
 
       * Replace :kconfig:option:`CONFIG_CLOCK_CONTROL_NRF_K32SRC_FREQUENCY` with the ``k32src-frequency`` property.
       * Replace :kconfig:option:`CONFIG_CLOCK_CONTROL_NRF_SOURCE` choice with the ``k32src`` enum property.
-      * Replace :kconfig:option:`CLOCK_CONTROL_NRF_K32SRC_RC` and :kconfig:option:`NRFX_CLOCK_LF_SRC_RC` with the ``k32src = "rc"``.
-      * Replace :kconfig:option:`CLOCK_CONTROL_NRF_K32SRC_XTAL` and :kconfig:option:`NRFX_CLOCK_LF_SRC_XTAL` with the ``k32src = "xtal"``.
-      * Replace :kconfig:option:`CLOCK_CONTROL_NRF_K32SRC_SYNTH` and :kconfig:option:`NRFX_CLOCK_LF_SRC_SYNTH` with the ``k32src = "synth"``.
-      * Replace :kconfig:option:`CLOCK_CONTROL_NRF_K32SRC_EXT_LOW_SWING` and :kconfig:option:`NRFX_CLOCK_LF_SRC_LOW_SWING` with the ``k32src = "ext_low_swing"``.
-      * Replace :kconfig:option:`CLOCK_CONTROL_NRF_K32SRC_EXT_FULL_SWING` and :kconfig:option:`NRFX_CLOCK_LF_SRC_FULL_SWING` with the ``k32src = "ext_full_swing"``.
+      * Replace :kconfig:option:`CONFIG_CLOCK_CONTROL_NRF_K32SRC_RC` and :kconfig:option:`CONFIG_NRFX_CLOCK_LF_SRC_RC` with the ``k32src = "rc"``.
+      * Replace :kconfig:option:`CONFIG_CLOCK_CONTROL_NRF_K32SRC_XTAL` and :kconfig:option:`CONFIG_NRFX_CLOCK_LF_SRC_XTAL` with the ``k32src = "xtal"``.
+      * Replace :kconfig:option:`CONFIG_CLOCK_CONTROL_NRF_K32SRC_SYNTH` and :kconfig:option:`CONFIG_NRFX_CLOCK_LF_SRC_SYNTH` with the ``k32src = "synth"``.
+      * Replace :kconfig:option:`CONFIG_CLOCK_CONTROL_NRF_K32SRC_EXT_LOW_SWING` and :kconfig:option:`CONFIG_NRFX_CLOCK_LF_SRC_LOW_SWING` with the ``k32src = "ext_low_swing"``.
+      * Replace :kconfig:option:`CONFIG_CLOCK_CONTROL_NRF_K32SRC_EXT_FULL_SWING` and :kconfig:option:`CONFIG_NRFX_CLOCK_LF_SRC_FULL_SWING` with the ``k32src = "ext_full_swing"``.
       * Replace :kconfig:option:`CONFIG_CLOCK_CONTROL_NRF_ACCURACY_PPM` choice with the ``k32src-accuracy-ppm`` enum property.
-      * Replace :kconfig:option:`CLOCK_CONTROL_NRF_K32SRC_500PPM` with the ``k32src-accuracy-ppm = <500>``.
-      * Replace :kconfig:option:`CLOCK_CONTROL_NRF_K32SRC_250PPM` with the ``k32src-accuracy-ppm = <250>``.
-      * Replace :kconfig:option:`CLOCK_CONTROL_NRF_K32SRC_150PPM` with the ``k32src-accuracy-ppm = <150>``.
-      * Replace :kconfig:option:`CLOCK_CONTROL_NRF_K32SRC_100PPM` with the ``k32src-accuracy-ppm = <100>``.
-      * Replace :kconfig:option:`CLOCK_CONTROL_NRF_K32SRC_75PPM` with the ``k32src-accuracy-ppm = <75>``.
-      * Replace :kconfig:option:`CLOCK_CONTROL_NRF_K32SRC_50PPM` with the ``k32src-accuracy-ppm = <50>``.
-      * Replace :kconfig:option:`CLOCK_CONTROL_NRF_K32SRC_30PPM` with the ``k32src-accuracy-ppm = <30>``.
-      * Replace :kconfig:option:`CLOCK_CONTROL_NRF_K32SRC_20PPM` with the ``k32src-accuracy-ppm = <20>``.
+      * Replace :kconfig:option:`CONFIG_CLOCK_CONTROL_NRF_K32SRC_500PPM` with the ``k32src-accuracy-ppm = <500>``.
+      * Replace :kconfig:option:`CONFIG_CLOCK_CONTROL_NRF_K32SRC_250PPM` with the ``k32src-accuracy-ppm = <250>``.
+      * Replace :kconfig:option:`CONFIG_CLOCK_CONTROL_NRF_K32SRC_150PPM` with the ``k32src-accuracy-ppm = <150>``.
+      * Replace :kconfig:option:`CONFIG_CLOCK_CONTROL_NRF_K32SRC_100PPM` with the ``k32src-accuracy-ppm = <100>``.
+      * Replace :kconfig:option:`CONFIG_CLOCK_CONTROL_NRF_K32SRC_75PPM` with the ``k32src-accuracy-ppm = <75>``.
+      * Replace :kconfig:option:`CONFIG_CLOCK_CONTROL_NRF_K32SRC_50PPM` with the ``k32src-accuracy-ppm = <50>``.
+      * Replace :kconfig:option:`CONFIG_CLOCK_CONTROL_NRF_K32SRC_30PPM` with the ``k32src-accuracy-ppm = <30>``.
+      * Replace :kconfig:option:`CONFIG_CLOCK_CONTROL_NRF_K32SRC_20PPM` with the ``k32src-accuracy-ppm = <20>``.
       * Replace :kconfig:option:`CONFIG_NRFX_CLOCK_LFXO_TWO_STAGE_ENABLED` with ``k32src = "xtal"`` or ``k32src = "ext_low_swing"`` or ``k32src = "ext_full_swing"``.
 
    #. Update your application to use the new clock control API.
