@@ -185,8 +185,7 @@ static bool retained_profile_ready(void)
 	       LL_AHB5_GRP1_IsEnabledClock(LL_AHB5_GRP1_PERIPH_NPU) == 0U &&
 	       (SAI2_Block_A->CR1 & (SAI_xCR1_SAIEN | SAI_xCR1_DMAEN)) == 0U &&
 	       (SAI2_Block_B->CR1 & (SAI_xCR1_SAIEN | SAI_xCR1_DMAEN)) == 0U &&
-	       (XSPI1->CR & XSPI_CR_EN) != 0U && (XSPI1->CR & XSPI_CR_FMODE) == XSPI_CR_FMODE &&
-	       (XSPI1->SR & XSPI_SR_BUSY) == 0U && !gpdma_channel_enabled();
+	       (XSPI1->CR & XSPI_CR_EN) != 0U && (XSPI1->CR & XSPI_CR_FMODE) == XSPI_CR_FMODE;
 }
 
 static bool restore_retained_memory_clock_path(void)
@@ -319,6 +318,12 @@ void pm_state_set(enum pm_state state, uint8_t substate_id)
 		eligible = retained_profile_ready();
 		if (!eligible) {
 			stop_stats.last_rejection = STM32N6_RETAINED_STOP_REJECTION_PROFILE;
+		} else if ((XSPI1->SR & XSPI_SR_BUSY) != 0U) {
+			eligible = false;
+			stop_stats.last_rejection = STM32N6_RETAINED_STOP_REJECTION_XSPI_BUSY;
+		} else if (gpdma_channel_enabled()) {
+			eligible = false;
+			stop_stats.last_rejection = STM32N6_RETAINED_STOP_REJECTION_DMA_ACTIVE;
 		}
 	} else if (enabled) {
 		stop_stats.last_rejection = STM32N6_RETAINED_STOP_REJECTION_INELIGIBLE;
