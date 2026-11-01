@@ -24,13 +24,38 @@ BUILD_ASSERT(IS_ENABLED(CONFIG_STM32_LPTIM_TIMER) && IS_ENABLED(CONFIG_STM32_LPT
 	     "Retained Stop requires LPTIM/LSE system timer");
 BUILD_ASSERT(!IS_ENABLED(CONFIG_PM_STATE_SET_IRQ_UNLOCKED),
 	     "Retained Stop requires IRQ-locked PM hooks");
+BUILD_ASSERT(!IS_ENABLED(CONFIG_MEMC) && !IS_ENABLED(CONFIG_MSPI),
+	     "Retained Stop requires boot-inherited XSPI ownership");
 
-#define RETAINED_STOP_POLL_LIMIT   100000U
-#define RETAINED_STOP_VECTOR_COUNT (16U + CONFIG_NUM_IRQS)
-#define RETAINED_STOP_VECTOR_ALIGN (1U << LOG2CEIL(4U * RETAINED_STOP_VECTOR_COUNT))
+#define RETAINED_STOP_POLL_LIMIT          100000U
+#define RETAINED_STOP_VECTOR_COUNT        (16U + CONFIG_NUM_IRQS)
+#define RETAINED_STOP_VECTOR_ALIGN        BIT(LOG2CEIL(4U * RETAINED_STOP_VECTOR_COUNT))
+#define RETAINED_STOP_XSPI_CANARY_WORDS   8U
+#define RETAINED_STOP_XSPI_CANARY_SIZE    (RETAINED_STOP_XSPI_CANARY_WORDS * sizeof(uint32_t))
+#define RETAINED_STOP_XSPI_STABLE_CR_MASK (~(XSPI_CR_FMODE | XSPI_CR_ABORT))
 
 static uintptr_t retained_stop_vectors[RETAINED_STOP_VECTOR_COUNT]
 	__aligned(RETAINED_STOP_VECTOR_ALIGN);
+
+struct retained_xspi_state {
+	uint32_t cr;
+	uint32_t dcr1;
+	uint32_t dcr2;
+	uint32_t dcr3;
+	uint32_t dcr4;
+	uint32_t ccr;
+	uint32_t tcr;
+	uint32_t ir;
+	uint32_t abr;
+	uint32_t wccr;
+	uint32_t wtcr;
+	uint32_t wir;
+	uint32_t wabr;
+	uint32_t hlcr;
+};
+
+static struct retained_xspi_state retained_xspi;
+static uint32_t retained_xspi_canary[RETAINED_STOP_XSPI_CANARY_WORDS];
 
 static volatile bool stop_enabled;
 static volatile struct stm32n6_retained_stop_stats stop_stats;
@@ -82,6 +107,114 @@ static bool gpdma_channel_enabled(void)
 	       GPDMA_CHANNEL_ENABLED(GPDMA1_Channel12) || GPDMA_CHANNEL_ENABLED(GPDMA1_Channel13) ||
 	       GPDMA_CHANNEL_ENABLED(GPDMA1_Channel14) || GPDMA_CHANNEL_ENABLED(GPDMA1_Channel15);
 #undef GPDMA_CHANNEL_ENABLED
+}
+
+static void snapshot_xspi_configuration(void)
+{
+	retained_xspi.cr = XSPI1->CR;
+	retained_xspi.dcr1 = XSPI1->DCR1;
+	retained_xspi.dcr2 = XSPI1->DCR2;
+	retained_xspi.dcr3 = XSPI1->DCR3;
+	retained_xspi.dcr4 = XSPI1->DCR4;
+	retained_xspi.ccr = XSPI1->CCR;
+	retained_xspi.tcr = XSPI1->TCR;
+	retained_xspi.ir = XSPI1->IR;
+	retained_xspi.abr = XSPI1->ABR;
+	retained_xspi.wccr = XSPI1->WCCR;
+	retained_xspi.wtcr = XSPI1->WTCR;
+	retained_xspi.wir = XSPI1->WIR;
+	retained_xspi.wabr = XSPI1->WABR;
+	retained_xspi.hlcr = XSPI1->HLCR;
+}
+
+static bool xspi_configuration_matches(void)
+{
+	return (XSPI1->CR & RETAINED_STOP_XSPI_STABLE_CR_MASK) ==
+		       (retained_xspi.cr & RETAINED_STOP_XSPI_STABLE_CR_MASK) &&
+	       XSPI1->DCR1 == retained_xspi.dcr1 && XSPI1->DCR2 == retained_xspi.dcr2 &&
+	       XSPI1->DCR3 == retained_xspi.dcr3 && XSPI1->DCR4 == retained_xspi.dcr4 &&
+	       XSPI1->CCR == retained_xspi.ccr && XSPI1->TCR == retained_xspi.tcr &&
+	       XSPI1->IR == retained_xspi.ir && XSPI1->ABR == retained_xspi.abr &&
+	       XSPI1->WCCR == retained_xspi.wccr && XSPI1->WTCR == retained_xspi.wtcr &&
+	       XSPI1->WIR == retained_xspi.wir && XSPI1->WABR == retained_xspi.wabr &&
+	       XSPI1->HLCR == retained_xspi.hlcr;
+}
+
+static bool prepare_xspi_for_stop(void)
+{
+	volatile uint32_t *mapped = (volatile uint32_t *)(uintptr_t)XSPI1_BASE;
+	uint32_t remaining;
+
+#if defined(CONFIG_CACHE_MANAGEMENT) && defined(CONFIG_DCACHE)
+	if (sys_cache_data_flush_all() != 0 ||
+	    sys_cache_data_flush_and_invd_range((void *)(uintptr_t)XSPI1_BASE,
+						RETAINED_STOP_XSPI_CANARY_SIZE) != 0) {
+		return false;
+	}
+#endif
+	for (uint32_t i = 0U; i < RETAINED_STOP_XSPI_CANARY_WORDS; ++i) {
+		retained_xspi_canary[i] = mapped[i];
+	}
+	__DSB();
+	__ISB();
+
+	XSPI1->CR |= XSPI_CR_ABORT;
+	for (remaining = RETAINED_STOP_POLL_LIMIT; remaining != 0U; --remaining) {
+		if ((XSPI1->SR & XSPI_SR_TCF) != 0U) {
+			break;
+		}
+	}
+	if (remaining == 0U) {
+		return false;
+	}
+	XSPI1->FCR = XSPI_FCR_CTCF;
+	if ((XSPI1->SR & XSPI_SR_TCF) != 0U) {
+		return false;
+	}
+	for (remaining = RETAINED_STOP_POLL_LIMIT; remaining != 0U; --remaining) {
+		if ((XSPI1->SR & XSPI_SR_BUSY) == 0U) {
+			break;
+		}
+	}
+	if (remaining == 0U || (XSPI1->CR & XSPI_CR_ABORT) != 0U) {
+		return false;
+	}
+
+	XSPI1->CR &= ~XSPI_CR_FMODE;
+	__DSB();
+	__ISB();
+	return (XSPI1->CR & XSPI_CR_FMODE) == 0U && xspi_configuration_matches();
+}
+
+static bool restore_xspi_mapping_and_verify(void)
+{
+	volatile uint32_t *mapped = (volatile uint32_t *)(uintptr_t)XSPI1_BASE;
+
+	if ((XSPI1->CR & XSPI_CR_EN) == 0U ||
+	    (XSPI1->CR & RETAINED_STOP_XSPI_STABLE_CR_MASK) !=
+		    (retained_xspi.cr & RETAINED_STOP_XSPI_STABLE_CR_MASK)) {
+		return false;
+	}
+	XSPI1->CR = (XSPI1->CR & ~XSPI_CR_FMODE) | (retained_xspi.cr & XSPI_CR_FMODE);
+	__DSB();
+	__ISB();
+	if ((XSPI1->CR & XSPI_CR_FMODE) != (retained_xspi.cr & XSPI_CR_FMODE) ||
+	    !xspi_configuration_matches()) {
+		return false;
+	}
+
+#if defined(CONFIG_CACHE_MANAGEMENT) && defined(CONFIG_DCACHE)
+	if (sys_cache_data_invd_range((void *)(uintptr_t)XSPI1_BASE,
+				      RETAINED_STOP_XSPI_CANARY_SIZE) != 0) {
+		return false;
+	}
+#endif
+	for (uint32_t i = 0U; i < RETAINED_STOP_XSPI_CANARY_WORDS; ++i) {
+		if (mapped[i] != retained_xspi_canary[i]) {
+			return false;
+		}
+	}
+	return true;
 }
 
 struct lptim_wake_gates {
@@ -244,7 +377,7 @@ static bool restore_retained_memory_clock_path(void)
 	       LL_AHB5_GRP1_IsEnabledClock(LL_AHB5_GRP1_PERIPH_XSPI1) == 1U &&
 	       LL_AHB5_GRP1_IsEnabledClockLowPower(LL_AHB5_GRP1_PERIPH_XSPIM) == 1U &&
 	       LL_AHB5_GRP1_IsEnabledClockLowPower(LL_AHB5_GRP1_PERIPH_XSPI1) == 1U &&
-	       (XSPI1->CR & XSPI_CR_EN) != 0U && (XSPI1->CR & XSPI_CR_FMODE) == XSPI_CR_FMODE;
+	       (XSPI1->CR & XSPI_CR_EN) != 0U;
 }
 
 static __noreturn void retained_stop_fail_stop(void)
@@ -318,12 +451,11 @@ void pm_state_set(enum pm_state state, uint8_t substate_id)
 		eligible = retained_profile_ready();
 		if (!eligible) {
 			stop_stats.last_rejection = STM32N6_RETAINED_STOP_REJECTION_PROFILE;
-		} else if ((XSPI1->SR & XSPI_SR_BUSY) != 0U) {
-			eligible = false;
-			stop_stats.last_rejection = STM32N6_RETAINED_STOP_REJECTION_XSPI_BUSY;
 		} else if (gpdma_channel_enabled()) {
 			eligible = false;
 			stop_stats.last_rejection = STM32N6_RETAINED_STOP_REJECTION_DMA_ACTIVE;
+		} else {
+			snapshot_xspi_configuration();
 		}
 	} else if (enabled) {
 		stop_stats.last_rejection = STM32N6_RETAINED_STOP_REJECTION_INELIGIBLE;
@@ -389,6 +521,9 @@ void pm_state_set(enum pm_state state, uint8_t substate_id)
 	if (!install_retained_stop_vectors(&original_vtor)) {
 		retained_stop_fail_stop();
 	}
+	if (!prepare_xspi_for_stop()) {
+		retained_stop_fail_stop();
+	}
 	LL_PWR_ClearFlag_STOP_SB();
 	LL_LPM_DisableEventOnPend();
 	LL_LPM_DisableSleepOnExit();
@@ -398,7 +533,7 @@ void pm_state_set(enum pm_state state, uint8_t substate_id)
 	__WFI();
 	if (LL_PWR_IsActiveFlag_STOP() == 0U) {
 		stop_stats.last_rejection = STM32N6_RETAINED_STOP_REJECTION_STOP_FLAG;
-		if (!restore_retained_memory_clock_path() ||
+		if (!restore_retained_memory_clock_path() || !restore_xspi_mapping_and_verify() ||
 		    !restore_lptim_wake_gates(&lptim_gates) ||
 		    !restore_stop_register_state(&saved) ||
 		    !restore_original_vectors(original_vtor)) {
@@ -415,8 +550,9 @@ void pm_state_set(enum pm_state state, uint8_t substate_id)
 
 	/* Stay in the internal-SRAM relocation closure until memory is verified. */
 	LL_LPM_EnableSleep();
-	if (!restore_retained_memory_clock_path() || !restore_lptim_wake_gates(&lptim_gates) ||
-	    !restore_stop_register_state(&saved) || !restore_original_vectors(original_vtor)) {
+	if (!restore_retained_memory_clock_path() || !restore_xspi_mapping_and_verify() ||
+	    !restore_lptim_wake_gates(&lptim_gates) || !restore_stop_register_state(&saved) ||
+	    !restore_original_vectors(original_vtor)) {
 		retained_stop_fail_stop();
 	}
 
