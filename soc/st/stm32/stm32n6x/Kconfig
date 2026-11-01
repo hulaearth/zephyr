@@ -48,6 +48,19 @@ config STM32N6_BRANCH_CACHE
 	help
 	  Enable the Cortex-M55's branch cache during SoC initialization.
 
+config STM32N6_PM_RETAINED_HSI
+	bool "Retained HSI Stop mode"
+	default n
+	depends on TRUSTED_EXECUTION_SECURE && SYS_CLOCK_EXISTS && !ZERO_LATENCY_IRQS && !SMP
+	select HAS_PM
+	select PM
+	help
+	  Enable secure suspend-to-idle substate 1 using the existing HSI64 run
+	  profile. The application must preserve external PSRAM power and memory
+	  mapping, keep the LPTIM/LSE system timer active, and explicitly enable
+	  runtime entry. Any clock or peripheral profile mismatch falls back to
+	  shallow WFI. This does not select a default PM policy or board state.
+
 source "soc/st/stm32/stm32n6x/axisram/Kconfig"
 source "soc/st/stm32/stm32n6x/npu/Kconfig"
 
