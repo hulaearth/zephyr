@@ -80,6 +80,10 @@ static uint32_t lptim_clock_presc = DT_PROP(LPTIM_SYSTIMER_NODE, st_prescaler);
 /* Minimum nb of clock cycles to have to set autoreload register correctly */
 #define LPTIM_GUARD_VALUE 2
 
+#if defined(CONFIG_STM32N6_PM_RETAINED_HSI)
+#define LPTIM_ARROK_POLL_LIMIT 100000U
+#endif
+
 static uint64_t accumulated_lptim_cnt;
 /* Next autoreload value to set */
 static uint32_t autoreload_next;
@@ -233,16 +237,13 @@ static inline bool arrm_state_get(void)
 	return (LL_LPTIM_IsActiveFlag_ARRM(LPTIM) && LL_LPTIM_IsEnabledIT_ARRM(LPTIM));
 }
 
-static void lptim_irq_handler(const struct device *unused)
+static bool lptim_handle_arrok(void)
 {
-
-	ARG_UNUSED(unused);
-
-	uint32_t autoreload = LL_LPTIM_GetAutoReload(LPTIM);
-
 	if ((LL_LPTIM_IsActiveFlag_ARROK(LPTIM) != 0)
 		&& LL_LPTIM_IsEnabledIT_ARROK(LPTIM) != 0) {
 		LL_LPTIM_ClearFlag_ARROK(LPTIM);
+		uint32_t autoreload = LL_LPTIM_GetAutoReload(LPTIM);
+
 		if ((autoreload_next > 0) && (autoreload_next != autoreload)) {
 			/* the new autoreload value change, we set it */
 			autoreload_ready = false;
@@ -250,7 +251,20 @@ static void lptim_irq_handler(const struct device *unused)
 		} else {
 			autoreload_ready = true;
 		}
+		return true;
 	}
+
+	return false;
+}
+
+static void lptim_irq_handler(const struct device *unused)
+{
+
+	ARG_UNUSED(unused);
+
+	uint32_t autoreload = LL_LPTIM_GetAutoReload(LPTIM);
+
+	(void)lptim_handle_arrok();
 
 	if (arrm_state_get()) {
 		k_spinlock_key_t key = k_spin_lock(&lock);
@@ -276,6 +290,41 @@ static void lptim_irq_handler(const struct device *unused)
 				? dticks : (dticks > 0));
 	}
 }
+
+#if defined(CONFIG_STM32N6_PM_RETAINED_HSI)
+static void lptim_complete_arrok_before_idle(void)
+{
+	uint32_t remaining;
+	bool arrok_handled = false;
+
+	for (remaining = LPTIM_ARROK_POLL_LIMIT; remaining != 0U; --remaining) {
+		arrok_handled |= lptim_handle_arrok();
+		if (autoreload_ready && LL_LPTIM_IsActiveFlag_ARROK(LPTIM) == 0U) {
+			break;
+		}
+	}
+	if (remaining == 0U || !arrok_handled || arrm_state_get()) {
+		return;
+	}
+
+	/* Clear only the NVIC latch for the ARROK flag just acknowledged above. */
+	k_irq_clear_pending(DT_IRQN(LPTIM_SYSTIMER_NODE));
+	if (arrm_state_get()) {
+		k_irq_set_pending(DT_IRQN(LPTIM_SYSTIMER_NODE));
+	}
+}
+
+void sys_clock_idle_enter(uint32_t ticks)
+{
+	sys_clock_set_timeout(ticks, true);
+#ifdef CONFIG_STM32_LPTIM_STDBY_TIMER
+	if (timeout_stdby) {
+		return;
+	}
+#endif
+	lptim_complete_arrok_before_idle();
+}
+#endif /* CONFIG_STM32N6_PM_RETAINED_HSI */
 
 static void lptim_set_autoreload(uint32_t arr)
 {
