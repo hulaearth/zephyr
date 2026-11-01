@@ -33,6 +33,8 @@ struct stm32n6_retained_stop_stats {
 	uint32_t wakes;
 	uint32_t rejections;
 	uint32_t last_rejection;
+	uint32_t pending_before_wfi;
+	uint32_t pending_after_wfi;
 };
 
 /**

@@ -73,6 +73,8 @@ int stm32n6_retained_stop_set_enabled(bool enabled)
 
 	if (enabled) {
 		stop_stats.last_rejection = STM32N6_RETAINED_STOP_REJECTION_NONE;
+		stop_stats.pending_before_wfi = 0U;
+		stop_stats.pending_after_wfi = 0U;
 	}
 	stop_enabled = enabled;
 	irq_unlock(key);
@@ -92,6 +94,8 @@ void stm32n6_retained_stop_get_stats(struct stm32n6_retained_stop_stats *stats)
 	stats->wakes = stop_stats.wakes;
 	stats->rejections = stop_stats.rejections;
 	stats->last_rejection = stop_stats.last_rejection;
+	stats->pending_before_wfi = stop_stats.pending_before_wfi;
+	stats->pending_after_wfi = stop_stats.pending_after_wfi;
 	irq_unlock(key);
 }
 
@@ -548,10 +552,12 @@ void pm_state_set(enum pm_state state, uint8_t substate_id)
 	LL_LPM_DisableEventOnPend();
 	LL_LPM_DisableSleepOnExit();
 	LL_LPM_EnableDeepSleep();
+	stop_stats.pending_before_wfi = SCB->ICSR;
 	__DSB();
 	__ISB();
 	__WFI();
 	if (LL_PWR_IsActiveFlag_STOP() == 0U) {
+		stop_stats.pending_after_wfi = SCB->ICSR;
 		stop_stats.last_rejection = STM32N6_RETAINED_STOP_REJECTION_STOP_FLAG;
 		if (!restore_retained_memory_clock_path() || !restore_xspi_mapping_and_verify() ||
 		    !restore_lptim_wake_gates(&lptim_gates) ||
