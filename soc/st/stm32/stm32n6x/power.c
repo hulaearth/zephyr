@@ -46,6 +46,9 @@ int stm32n6_retained_stop_set_enabled(bool enabled)
 {
 	unsigned int key = irq_lock();
 
+	if (enabled) {
+		stop_stats.last_rejection = STM32N6_RETAINED_STOP_REJECTION_NONE;
+	}
 	stop_enabled = enabled;
 	irq_unlock(key);
 	return 0;
@@ -63,6 +66,7 @@ void stm32n6_retained_stop_get_stats(struct stm32n6_retained_stop_stats *stats)
 	stats->entries = stop_stats.entries;
 	stats->wakes = stop_stats.wakes;
 	stats->rejections = stop_stats.rejections;
+	stats->last_rejection = stop_stats.last_rejection;
 	irq_unlock(key);
 }
 
@@ -306,11 +310,18 @@ void pm_state_set(enum pm_state state, uint8_t substate_id)
 	saturating_increment(&stop_stats.attempts);
 	saved.scr = SCB->SCR & STOP_SCR_MASK;
 	key = arch_pm_state_set_prepare();
-	eligible = stop_enabled && state == PM_STATE_SUSPEND_TO_IDLE && substate_id == 1U;
+	const bool enabled = stop_enabled;
+
+	eligible = enabled && state == PM_STATE_SUSPEND_TO_IDLE && substate_id == 1U;
 	if (eligible) {
 		snapshot_stop_register_state(&saved);
 		have_saved_state = true;
 		eligible = retained_profile_ready();
+		if (!eligible) {
+			stop_stats.last_rejection = STM32N6_RETAINED_STOP_REJECTION_PROFILE;
+		}
+	} else if (enabled) {
+		stop_stats.last_rejection = STM32N6_RETAINED_STOP_REJECTION_INELIGIBLE;
 	}
 	if (!eligible) {
 		if (have_saved_state && !restore_stop_register_state(&saved)) {
@@ -328,6 +339,7 @@ void pm_state_set(enum pm_state state, uint8_t substate_id)
 
 	/* Save and temporarily open documented LPTIM1 Stop wake gates. */
 	if (!prepare_lptim_wake_gates(&lptim_gates)) {
+		stop_stats.last_rejection = STM32N6_RETAINED_STOP_REJECTION_WAKE_GATES;
 		if (!restore_lptim_wake_gates(&lptim_gates) ||
 		    !restore_stop_register_state(&saved)) {
 			retained_stop_fail_stop();
@@ -352,6 +364,7 @@ void pm_state_set(enum pm_state state, uint8_t substate_id)
 	    LL_PWR_GetStopModeRegulVoltageScaling() != LL_PWR_REGU_STOP_VOLTAGE_SCALE3 ||
 	    LL_RCC_HSI_IsEnabledInStopMode() != 1U || !__HAL_RCC_BSEC_IS_CLK_ENABLED() ||
 	    !__HAL_RCC_BSEC_IS_CLK_SLEEP_ENABLED()) {
+		stop_stats.last_rejection = STM32N6_RETAINED_STOP_REJECTION_POWER_CONFIG;
 		if (!restore_lptim_wake_gates(&lptim_gates) ||
 		    !restore_stop_register_state(&saved)) {
 			retained_stop_fail_stop();
@@ -379,6 +392,7 @@ void pm_state_set(enum pm_state state, uint8_t substate_id)
 	__ISB();
 	__WFI();
 	if (LL_PWR_IsActiveFlag_STOP() == 0U) {
+		stop_stats.last_rejection = STM32N6_RETAINED_STOP_REJECTION_STOP_FLAG;
 		if (!restore_retained_memory_clock_path() ||
 		    !restore_lptim_wake_gates(&lptim_gates) ||
 		    !restore_stop_register_state(&saved) ||
@@ -392,6 +406,7 @@ void pm_state_set(enum pm_state state, uint8_t substate_id)
 		return;
 	}
 	saturating_increment(&stop_stats.entries);
+	stop_stats.last_rejection = STM32N6_RETAINED_STOP_REJECTION_NONE;
 
 	/* Stay in the internal-SRAM relocation closure until memory is verified. */
 	LL_LPM_EnableSleep();

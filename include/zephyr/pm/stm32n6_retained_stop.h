@@ -14,12 +14,23 @@
 extern "C" {
 #endif
 
+/** Last-stage code explaining why a retained Stop attempt did not enter Stop. */
+enum stm32n6_retained_stop_rejection {
+	STM32N6_RETAINED_STOP_REJECTION_NONE = 0,
+	STM32N6_RETAINED_STOP_REJECTION_INELIGIBLE = 1,
+	STM32N6_RETAINED_STOP_REJECTION_PROFILE = 2,
+	STM32N6_RETAINED_STOP_REJECTION_WAKE_GATES = 3,
+	STM32N6_RETAINED_STOP_REJECTION_POWER_CONFIG = 4,
+	STM32N6_RETAINED_STOP_REJECTION_STOP_FLAG = 5,
+};
+
 /** Saturating counters for retained Stop attempts and completed wakes. */
 struct stm32n6_retained_stop_stats {
 	uint32_t attempts;
 	uint32_t entries;
 	uint32_t wakes;
 	uint32_t rejections;
+	uint32_t last_rejection;
 };
 
 /**
@@ -33,8 +44,10 @@ int stm32n6_retained_stop_set_enabled(bool enabled);
 /**
  * @brief Read a counter snapshot in thread context.
  *
- * Profile mismatches increment rejections. A non-returning restoration fault
- * leaves entries ahead of wakes.
+ * Rejections count attempts that did not enter Stop. last_rejection reports
+ * the last stage that prevented entry during the most recently enabled test;
+ * it is reset when Stop is enabled and retained when disabled. A non-returning
+ * restoration fault leaves entries ahead of wakes.
  *
  * @param stats Non-NULL destination for the counter snapshot.
  */
