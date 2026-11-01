@@ -668,6 +668,7 @@ static void uart_emul_async_tx_handler(struct k_work *work)
 static void uart_emul_rx_stop(const struct device *dev, struct uart_emul_data *data)
 {
 	uint8_t *rx_buf = NULL;
+	uint8_t *rx_buf_next = NULL;
 	size_t rx_buf_offset = 0;
 	size_t rx_buf_data_len = 0;
 
@@ -678,6 +679,7 @@ static void uart_emul_rx_stop(const struct device *dev, struct uart_emul_data *d
 			K_SPINLOCK_BREAK;
 		}
 		rx_buf = data->rx_buf;
+		rx_buf_next = data->rx_buf_next;
 		rx_buf_offset = data->rx_buf_offset;
 		rx_buf_data_len = data->rx_buf_data_len;
 
@@ -714,6 +716,14 @@ static void uart_emul_rx_stop(const struct device *dev, struct uart_emul_data *d
 	};
 
 	uart_emul_post_event(dev, &rx_buf_released_event);
+	if (rx_buf_next != NULL) {
+		struct uart_event next_released = {
+			.type = UART_RX_BUF_RELEASED,
+			.data.rx_buf.buf = rx_buf_next,
+		};
+
+		uart_emul_post_event(dev, &next_released);
+	}
 	uart_emul_simple_event(dev, UART_RX_DISABLED);
 }
 
