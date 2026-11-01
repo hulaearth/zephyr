@@ -250,6 +250,7 @@ struct stop_register_state {
 	bool bsec_clock;
 	bool bsec_sleep_clock;
 	bool hsi_in_stop;
+	bool hse_enabled;
 	uint32_t stop_voltage_scale;
 };
 
@@ -264,6 +265,7 @@ static void snapshot_stop_register_state(struct stop_register_state *saved)
 	saved->bsec_clock = __HAL_RCC_BSEC_IS_CLK_ENABLED() != 0U;
 	saved->bsec_sleep_clock = __HAL_RCC_BSEC_IS_CLK_SLEEP_ENABLED() != 0U;
 	saved->hsi_in_stop = LL_RCC_HSI_IsEnabledInStopMode() != 0U;
+	saved->hse_enabled = (RCC->CSR & RCC_CSR_HSEONS) != 0U;
 	saved->stop_voltage_scale = LL_PWR_GetStopModeRegulVoltageScaling();
 }
 
@@ -296,6 +298,27 @@ static bool restore_stop_register_state(const struct stop_register_state *saved)
 	}
 	__HAL_RCC_PWR_CLK_DISABLE();
 	return __HAL_RCC_PWR_IS_CLK_ENABLED() == 0U;
+}
+
+static bool restore_hse_state(bool enabled)
+{
+	uint32_t remaining;
+	bool currently_enabled = (RCC->CSR & RCC_CSR_HSEONS) != 0U;
+
+	if (currently_enabled != enabled) {
+		if (enabled) {
+			LL_RCC_HSE_Enable();
+		} else {
+			LL_RCC_HSE_Disable();
+		}
+	}
+	for (remaining = RETAINED_STOP_POLL_LIMIT; remaining != 0U; --remaining) {
+		if ((LL_RCC_HSE_IsReady() != 0U) == enabled) {
+			break;
+		}
+	}
+	return remaining != 0U && ((RCC->CSR & RCC_CSR_HSEONS) != 0U) == enabled &&
+	       (LL_RCC_HSE_IsReady() != 0U) == enabled;
 }
 
 static bool retained_profile_ready(void)
@@ -548,8 +571,8 @@ void pm_state_set(enum pm_state state, uint8_t substate_id)
 	/* Stay in the internal-SRAM relocation closure until memory is verified. */
 	LL_LPM_EnableSleep();
 	if (!restore_retained_memory_clock_path() || !restore_xspi_mapping_and_verify() ||
-	    !restore_lptim_wake_gates(&lptim_gates) || !restore_stop_register_state(&saved) ||
-	    !restore_original_vectors(original_vtor)) {
+	    !restore_hse_state(saved.hse_enabled) || !restore_lptim_wake_gates(&lptim_gates) ||
+	    !restore_stop_register_state(&saved) || !restore_original_vectors(original_vtor)) {
 		retained_stop_fail_stop();
 	}
 
