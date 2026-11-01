@@ -269,7 +269,7 @@ static void snapshot_stop_register_state(struct stop_register_state *saved)
 	saved->bsec_clock = __HAL_RCC_BSEC_IS_CLK_ENABLED() != 0U;
 	saved->bsec_sleep_clock = __HAL_RCC_BSEC_IS_CLK_SLEEP_ENABLED() != 0U;
 	saved->hsi_in_stop = LL_RCC_HSI_IsEnabledInStopMode() != 0U;
-	saved->hse_enabled = (RCC->CSR & RCC_CSR_HSEONS) != 0U;
+	saved->hse_enabled = (RCC->CR & RCC_CR_HSEON) != 0U;
 	saved->stop_voltage_scale = LL_PWR_GetStopModeRegulVoltageScaling();
 }
 
@@ -307,7 +307,7 @@ static bool restore_stop_register_state(const struct stop_register_state *saved)
 static bool restore_hse_state(bool enabled)
 {
 	uint32_t remaining;
-	bool currently_enabled = (RCC->CSR & RCC_CSR_HSEONS) != 0U;
+	bool currently_enabled = (RCC->CR & RCC_CR_HSEON) != 0U;
 
 	if (currently_enabled != enabled) {
 		if (enabled) {
@@ -321,7 +321,7 @@ static bool restore_hse_state(bool enabled)
 			break;
 		}
 	}
-	return remaining != 0U && ((RCC->CSR & RCC_CSR_HSEONS) != 0U) == enabled &&
+	return remaining != 0U && ((RCC->CR & RCC_CR_HSEON) != 0U) == enabled &&
 	       (LL_RCC_HSE_IsReady() != 0U) == enabled;
 }
 
