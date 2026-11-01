@@ -54,8 +54,24 @@ struct queue_item {
 #define SAI_CONT_RX_NODE_DMA 1U
 #define SAI_CONT_RX_NODE_QUEUED 2U
 #define SAI_CONT_RX_NODE_BORROWED 3U
+#define SAI_CONT_RX_FAULT_NONE 0U
+#define SAI_CONT_RX_FAULT_CALLBACK 1U
+#define SAI_CONT_RX_FAULT_PREFIX 2U
+#define SAI_CONT_RX_FAULT_QUEUE_FULL 3U
+#define SAI_CONT_RX_FAULT_RELEASE_DMA_DISABLED 4U
+#define SAI_CONT_RX_FAULT_NOT_RUNNING 5U
+#define SAI_CONT_RX_FAULT_ALREADY_FAULTED 6U
 #define SAI_CONT_RX_LINK_UPDATE_MASK \
 	(DMA_CLLR_UT1 | DMA_CLLR_UT2 | DMA_CLLR_UB1 | DMA_CLLR_USA | DMA_CLLR_UDA | DMA_CLLR_ULL)
+
+struct sai_continuous_fault_snapshot {
+	uint8_t reason;
+	int status;
+	uint32_t flags;
+	uint32_t sai_status;
+	uint32_t dma_ccr;
+	uint32_t dma_csr;
+};
 
 struct sai_continuous_node_storage {
 	DMA_NodeTypeDef node;
@@ -104,6 +120,8 @@ struct stream {
 	bool continuous_stop_target_complete;
 	uint8_t continuous_stop_target;
 	bool continuous_fault;
+	bool continuous_fault_reported;
+	struct sai_continuous_fault_snapshot continuous_fault_snapshot;
 	DMA_NodeTypeDef *continuous_nodes[SAI_CONT_RX_NODE_COUNT];
 	DMA_NodeTypeDef *continuous_tail;
 	uint32_t continuous_link_mask;
@@ -136,6 +154,54 @@ struct stm32_sai_sub_data {
 	struct sai_continuous_node_storage *continuous_node_storage;
 #endif
 };
+
+#if defined(CONFIG_I2S_STM32_SAI_CONTINUOUS_RX_N6)
+static void sai_continuous_fault_capture(struct stm32_sai_sub_data *sub_data, uint8_t reason,
+					 int status, uint32_t flags, uint32_t sai_status)
+{
+	struct stream *stream = &sub_data->stream;
+	unsigned int key = irq_lock();
+
+	if (stream->continuous_fault_snapshot.reason != SAI_CONT_RX_FAULT_NONE) {
+		irq_unlock(key);
+		return;
+	}
+	stream->continuous_fault_snapshot = (struct sai_continuous_fault_snapshot){
+		.reason = reason,
+		.status = status,
+		.flags = flags,
+		.sai_status = sai_status,
+		.dma_ccr = sub_data->hdma.Instance->CCR,
+		.dma_csr = sub_data->hdma.Instance->CSR,
+	};
+	irq_unlock(key);
+}
+
+static void sai_continuous_fault_report(struct stm32_sai_sub_data *sub_data, const char *phase)
+{
+	struct stream *stream = &sub_data->stream;
+	struct sai_continuous_fault_snapshot snapshot;
+	int32_t state;
+	bool fault;
+	unsigned int key = irq_lock();
+
+	if (stream->continuous_fault_reported) {
+		irq_unlock(key);
+		return;
+	}
+	stream->continuous_fault_reported = true;
+	snapshot = stream->continuous_fault_snapshot;
+	state = stream->state;
+	fault = stream->continuous_fault;
+	irq_unlock(key);
+
+	LOG_ERR("Continuous RX %s: reason=%u status=%d flags=0x%08x sai_sr=0x%08x "
+		"dma_ccr=0x%08x dma_csr=0x%08x state=%d fault=%u",
+		phase, (unsigned int)snapshot.reason, snapshot.status, snapshot.flags,
+		snapshot.sai_status, snapshot.dma_ccr, snapshot.dma_csr, state,
+		(unsigned int)fault);
+}
+#endif
 
 struct stm32_sai_sub_cfg {
 	const struct pinctrl_dev_config *pincfg;
@@ -488,6 +554,7 @@ static void dma_callback(const struct device *dma_dev, void *arg, uint32_t chann
 	if (stream->continuous_rx) {
 		uint32_t flags = __HAL_DMA_GET_FLAG(hdma, DMA_FLAG_TC | DMA_FLAG_HT | DMA_FLAG_DTE |
 						 DMA_FLAG_ULE | DMA_FLAG_USE | DMA_FLAG_TO | DMA_FLAG_SUSP);
+		uint32_t sai_status = sub_data->hsai.Instance->SR;
 		if (stream->state != I2S_STATE_RUNNING &&
 		    !(stream->state == I2S_STATE_STOPPING && stream->continuous_stop_pending)) {
 			if (flags != 0U) {
@@ -495,13 +562,15 @@ static void dma_callback(const struct device *dma_dev, void *arg, uint32_t chann
 			}
 			return;
 		}
-		uint32_t sai_errors = sub_data->hsai.Instance->SR &
+		uint32_t sai_errors = sai_status &
 			(SAI_xSR_OVRUDR | SAI_xSR_WCKCFG | SAI_xSR_AFSDET | SAI_xSR_LFSDET);
 		uint32_t errors = flags & (DMA_FLAG_DTE | DMA_FLAG_ULE | DMA_FLAG_USE |
 					   DMA_FLAG_TO | DMA_FLAG_SUSP);
 		uint32_t tc = flags & DMA_FLAG_TC;
 		uint32_t ht = flags & DMA_FLAG_HT;
 		if (status < 0 || errors != 0U || sai_errors != 0U) {
+			sai_continuous_fault_capture(sub_data, SAI_CONT_RX_FAULT_CALLBACK, status,
+						     flags, sai_status);
 			if (flags != 0U) {
 				__HAL_DMA_CLEAR_FLAG(hdma, flags);
 			}
@@ -611,6 +680,8 @@ static void dma_callback(const struct device *dma_dev, void *arg, uint32_t chann
 			return;
 		}
 		if (plan != SAI_RX_PREFIX_READY) {
+			sai_continuous_fault_capture(sub_data, SAI_CONT_RX_FAULT_PREFIX, status,
+						     flags, sai_status);
 			stream->continuous_fault = true;
 			stream->state = I2S_STATE_ERROR;
 			__HAL_DMA_DISABLE(hdma);
@@ -639,6 +710,8 @@ static void dma_callback(const struct device *dma_dev, void *arg, uint32_t chann
 				.size = stream->i2s_cfg.block_size,
 			};
 			if (k_msgq_put(&stream->queue, &item, K_NO_WAIT) != 0) {
+				sai_continuous_fault_capture(sub_data, SAI_CONT_RX_FAULT_QUEUE_FULL,
+							     status, flags, sai_status);
 				stream->continuous_fault = true;
 				stream->state = I2S_STATE_ERROR;
 				__HAL_DMA_DISABLE(hdma);
@@ -1057,6 +1130,11 @@ static int stm32_sai_sub_read(const struct device *dev, void **mem_block, size_t
 
 	if (stream->state == I2S_STATE_NOT_READY || stream->state == I2S_STATE_ERROR) {
 		LOG_ERR("RX invalid state: %d", (int)stream->state);
+#if defined(CONFIG_I2S_STM32_SAI_CONTINUOUS_RX_N6)
+		if (stream->continuous_rx && stream->state == I2S_STATE_ERROR) {
+			sai_continuous_fault_report(sub_data, "read_error");
+		}
+#endif
 		return -EIO;
 	}
 
@@ -1064,18 +1142,21 @@ static int stm32_sai_sub_read(const struct device *dev, void **mem_block, size_t
 	if (ret < 0) {
 	#if defined(CONFIG_I2S_STM32_SAI_CONTINUOUS_RX_N6)
 		if (stream->continuous_rx) {
-			uint32_t sai_status = sub_data->hsai.Instance->SR &
+			uint32_t sai_status = sub_data->hsai.Instance->SR;
+			uint32_t sai_errors = sai_status &
 				(SAI_xSR_OVRUDR | SAI_xSR_WCKCFG | SAI_xSR_AFSDET | SAI_xSR_LFSDET);
-			if (sai_status != 0U) {
+			if (sai_errors != 0U) {
+				sai_continuous_fault_capture(
+					sub_data, SAI_CONT_RX_FAULT_CALLBACK, -EIO,
+					__HAL_DMA_GET_FLAG(&sub_data->hdma, DMA_FLAG_TC | DMA_FLAG_HT |
+								DMA_FLAG_DTE | DMA_FLAG_ULE | DMA_FLAG_USE |
+								DMA_FLAG_TO | DMA_FLAG_SUSP),
+					sai_status);
 				stream->continuous_fault = true;
 				stream->state = I2S_STATE_ERROR;
 				__HAL_DMA_DISABLE(&sub_data->hdma);
 				sub_data->hsai.Instance->CR1 &= ~(SAI_xCR1_DMAEN | SAI_xCR1_SAIEN);
-				LOG_ERR("SAI continuous RX fault: status=%08x dma=%08x",
-					(unsigned int)sai_status,
-					(unsigned int)__HAL_DMA_GET_FLAG(&sub_data->hdma,
-						DMA_FLAG_TC | DMA_FLAG_HT | DMA_FLAG_DTE |
-						DMA_FLAG_ULE | DMA_FLAG_USE | DMA_FLAG_TO | DMA_FLAG_SUSP));
+				sai_continuous_fault_report(sub_data, "read_error");
 				return -EIO;
 			}
 		}
@@ -1152,6 +1233,8 @@ static int continuous_rx_start(const struct device *dev)
 	stream->continuous_max_callback_gap_cycles = 0U;
 	stream->continuous_last_callback_cycle = 0U;
 	stream->continuous_callback_cycle_valid = false;
+	stream->continuous_fault_reported = false;
+	stream->continuous_fault_snapshot = (struct sai_continuous_fault_snapshot){0};
 	irq_unlock(key);
 	stream->continuous_fault = false;
 	stream->continuous_quiesced = false;
@@ -1488,7 +1571,15 @@ int stm32_sai_rx_release(const struct device *dev, void *buffer)
 		return 0;
 	}
 	if (stream->continuous_fault || stream->state != I2S_STATE_RUNNING) {
+		if (stream->continuous_fault_snapshot.reason == SAI_CONT_RX_FAULT_NONE) {
+			sai_continuous_fault_capture(
+				sub_data, stream->continuous_fault ? SAI_CONT_RX_FAULT_ALREADY_FAULTED :
+								 SAI_CONT_RX_FAULT_NOT_RUNNING,
+				-EIO, 0U,
+				sub_data->hsai.Instance->SR);
+		}
 		irq_unlock(key);
+		sai_continuous_fault_report(sub_data, "release_error");
 		return -EIO;
 	}
 	if (index != stream->continuous_next_release) {
@@ -1508,12 +1599,19 @@ int stm32_sai_rx_release(const struct device *dev, void *buffer)
 		stream->continuous_append_readback_failures++;
 	}
 	if ((sub_data->hdma.Instance->CCR & DMA_CCR_EN) == 0U) {
+		sai_continuous_fault_capture(
+			sub_data, SAI_CONT_RX_FAULT_RELEASE_DMA_DISABLED, -EIO,
+			__HAL_DMA_GET_FLAG(&sub_data->hdma, DMA_FLAG_TC | DMA_FLAG_HT |
+							DMA_FLAG_DTE | DMA_FLAG_ULE | DMA_FLAG_USE |
+							DMA_FLAG_TO | DMA_FLAG_SUSP),
+			sub_data->hsai.Instance->SR);
 		stream->continuous_tail->LinkRegisters[5] = 0U;
 		__DSB();
 		stream->continuous_fault = true;
 		stream->state = I2S_STATE_ERROR;
 		__HAL_DMA_DISABLE(&sub_data->hdma);
 		irq_unlock(key);
+		sai_continuous_fault_report(sub_data, "release_error");
 		return -EIO;
 	}
 	stream->continuous_tail = stream->continuous_nodes[index];
