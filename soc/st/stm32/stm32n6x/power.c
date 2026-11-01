@@ -168,9 +168,6 @@ static bool prepare_xspi_for_stop(void)
 		return false;
 	}
 	XSPI1->FCR = XSPI_FCR_CTCF;
-	if ((XSPI1->SR & XSPI_SR_TCF) != 0U) {
-		return false;
-	}
 	for (remaining = RETAINED_STOP_POLL_LIMIT; remaining != 0U; --remaining) {
 		if ((XSPI1->SR & XSPI_SR_BUSY) == 0U) {
 			break;
