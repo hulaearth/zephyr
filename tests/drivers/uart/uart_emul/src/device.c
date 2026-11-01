@@ -38,6 +38,12 @@ struct uart_emul_device_fixture {
 #endif /* CONFIG_UART_INTERRUPT_DRIVEN */
 #ifdef CONFIG_UART_ASYNC_API
 	struct k_event async_events;
+	struct {
+		enum uart_event_type type;
+		uint8_t *buf;
+	} rx_events[4];
+	size_t rx_event_count;
+	uint8_t rx_next_content[SAMPLE_DATA_SIZE];
 #endif /* CONFIG_UART_ASYNC_API */
 };
 
@@ -89,6 +95,7 @@ static void uart_emul_device_before(void *f)
 	uart_rx_disable(fixture->dev);
 
 	k_event_set(&fixture->async_events, 0);
+	fixture->rx_event_count = 0;
 #endif /* CONFIG_UART_ASYNC_API */
 }
 
@@ -235,6 +242,52 @@ static bool uart_emul_device_wait_for_event(struct uart_emul_device_fixture *fix
 {
 	return k_event_wait(&fixture->async_events, ((uint32_t)1 << event), false, K_SECONDS(1)) !=
 	       0;
+}
+
+static void uart_emul_rx_release_callback(const struct device *dev, struct uart_event *evt,
+					  void *user_data)
+{
+	struct uart_emul_device_fixture *fixture = user_data;
+	size_t index = fixture->rx_event_count;
+
+	ARG_UNUSED(dev);
+	zassert_not_null(evt);
+	zassert_true(index < ARRAY_SIZE(fixture->rx_events));
+	fixture->rx_events[index].type = evt->type;
+	fixture->rx_events[index].buf = NULL;
+	fixture->rx_event_count++;
+
+	switch (evt->type) {
+	case UART_RX_BUF_RELEASED:
+		fixture->rx_events[index].buf = evt->data.rx_buf.buf;
+		break;
+	case UART_RX_DISABLED:
+		break;
+	default:
+		break;
+	}
+	k_event_post(&fixture->async_events, (uint32_t)1 << evt->type);
+}
+
+ZTEST_F(uart_emul_device, test_async_rx_disable_releases_current_and_next_buffers)
+{
+	zassert_ok(uart_callback_set(fixture->dev, uart_emul_rx_release_callback, fixture));
+	fixture->rx_event_count = 0;
+
+	zassert_ok(uart_rx_enable(fixture->dev, fixture->rx_content, sizeof(fixture->rx_content),
+				  SYS_FOREVER_US));
+	zassert_ok(uart_rx_buf_rsp(fixture->dev, fixture->rx_next_content,
+				   sizeof(fixture->rx_next_content)));
+	zassert_ok(uart_rx_disable(fixture->dev));
+	zassert_true(uart_emul_device_wait_for_event(fixture, UART_RX_DISABLED),
+		     "UART_RX_DISABLED event expected");
+
+	zassert_equal(fixture->rx_event_count, 3);
+	zassert_equal(fixture->rx_events[0].type, UART_RX_BUF_RELEASED);
+	zassert_equal(fixture->rx_events[0].buf, fixture->rx_content);
+	zassert_equal(fixture->rx_events[1].type, UART_RX_BUF_RELEASED);
+	zassert_equal(fixture->rx_events[1].buf, fixture->rx_next_content);
+	zassert_equal(fixture->rx_events[2].type, UART_RX_DISABLED);
 }
 
 ZTEST_F(uart_emul_device, test_async)
