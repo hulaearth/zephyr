@@ -517,6 +517,13 @@ void sys_clock_set_timeout(uint32_t ticks, bool idle)
 	/* with slow lptim_clock_freq, LPTIM_GUARD_VALUE of 1 is enough */
 	next_arr = next_arr - 1U;
 
+#if defined(CONFIG_STM32N6_PM_RETAINED_HSI)
+	/* A shorter period leaves no counter value at which the guard above
+	 * permits a later timeout to extend ARR, trapping the timer in short IRQs.
+	 */
+	next_arr = MAX(next_arr, LPTIM_GUARD_VALUE);
+#endif
+
 	/* Update autoreload register */
 	lptim_set_autoreload(next_arr);
 
