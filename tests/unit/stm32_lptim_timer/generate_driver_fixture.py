@@ -11,6 +11,7 @@ import sys
 FUNCTIONS = (
 	("static inline bool arrm_state_get", "arrm_state_get"),
 	("static inline uint32_t z_clock_lptim_getcounter", "z_clock_lptim_getcounter"),
+	("static bool lptim_handle_arrok", "lptim_handle_arrok"),
 	("static void lptim_irq_handler", "lptim_irq_handler"),
 	("static void lptim_set_autoreload", "lptim_set_autoreload"),
 	("void sys_clock_set_timeout", "sys_clock_set_timeout"),
