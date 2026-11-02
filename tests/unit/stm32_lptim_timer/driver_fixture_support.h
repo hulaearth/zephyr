@@ -97,6 +97,7 @@ static inline int clock_control_off(void *dev, clock_control_subsys_t subsys)
 static inline void LL_LPTIM_ClearFlag_ARROK(void *timer)
 {
 	ARG_UNUSED(timer);
+	fake_arrok_active = false;
 }
 
 static inline void LL_LPTIM_SetAutoReload(void *timer, uint32_t value)

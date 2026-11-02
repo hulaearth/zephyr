@@ -237,6 +237,23 @@ static inline bool arrm_state_get(void)
 	return (LL_LPTIM_IsActiveFlag_ARRM(LPTIM) && LL_LPTIM_IsEnabledIT_ARRM(LPTIM));
 }
 
+static inline uint32_t z_clock_lptim_getcounter(void)
+{
+	uint32_t lp_time;
+	uint32_t lp_time_prev_read;
+
+	/* It should be noted that to read reliably the content
+	 * of the LPTIM_CNT register, two successive read accesses
+	 * must be performed and compared
+	 */
+	lp_time = LL_LPTIM_GetCounter(LPTIM);
+	do {
+		lp_time_prev_read = lp_time;
+		lp_time = LL_LPTIM_GetCounter(LPTIM);
+	} while (lp_time != lp_time_prev_read);
+	return lp_time;
+}
+
 static bool lptim_handle_arrok(void)
 {
 	if ((LL_LPTIM_IsActiveFlag_ARROK(LPTIM) != 0)
@@ -245,6 +262,20 @@ static bool lptim_handle_arrok(void)
 		uint32_t autoreload = LL_LPTIM_GetAutoReload(LPTIM);
 
 		if ((autoreload_next > 0) && (autoreload_next != autoreload)) {
+			uint32_t lp_time = z_clock_lptim_getcounter();
+
+			if (LL_LPTIM_IsActiveFlag_ARRM(LPTIM) || autoreload <= lp_time ||
+			    (autoreload - lp_time) < LPTIM_GUARD_VALUE) {
+				/* The old match is pending or too close; let its IRQ account it. */
+				autoreload_ready = true;
+				return true;
+			}
+			if (autoreload_next <= lp_time ||
+			    (autoreload_next - lp_time) < LPTIM_GUARD_VALUE) {
+				/* Keep a stale or near deadline ahead of the live counter. */
+				autoreload_next = lp_time + LPTIM_GUARD_VALUE;
+			}
+
 			/* the new autoreload value change, we set it */
 			autoreload_ready = false;
 			LL_LPTIM_SetAutoReload(LPTIM, autoreload_next);
@@ -342,23 +373,6 @@ static void lptim_set_autoreload(uint32_t arr)
 		LL_LPTIM_ClearFlag_ARROK(LPTIM);
 		LL_LPTIM_SetAutoReload(LPTIM, arr);
 	}
-}
-
-static inline uint32_t z_clock_lptim_getcounter(void)
-{
-	uint32_t lp_time;
-	uint32_t lp_time_prev_read;
-
-	/* It should be noted that to read reliably the content
-	 * of the LPTIM_CNT register, two successive read accesses
-	 * must be performed and compared
-	 */
-	lp_time = LL_LPTIM_GetCounter(LPTIM);
-	do {
-		lp_time_prev_read = lp_time;
-		lp_time = LL_LPTIM_GetCounter(LPTIM);
-	} while (lp_time != lp_time_prev_read);
-	return lp_time;
 }
 
 void sys_clock_set_timeout(uint32_t ticks, bool idle)
