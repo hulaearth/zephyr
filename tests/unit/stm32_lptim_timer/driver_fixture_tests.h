@@ -72,6 +72,77 @@ ZTEST(stm32_lptim_timer, test_max_timeout_clamps_to_full_period_arr)
 	zassert_equal(0U, fake_lock_depth);
 }
 
+ZTEST(stm32_lptim_timer, test_arrok_near_old_match_preserves_old_period)
+{
+	autoreload_next = 500U;
+	autoreload_ready = true;
+	fake_autoreload = 100U;
+	fake_counter = 99U;
+	fake_arrm_active = false;
+	fake_arrm_enabled = true;
+	fake_arrok_active = true;
+	fake_arrok_enabled = true;
+	fake_autoreload_writes = 0U;
+	accumulated_lptim_cnt = 0U;
+	fake_announced_ticks = 0U;
+
+	zassert_true(lptim_handle_arrok());
+	zassert_equal(100U, fake_autoreload);
+	zassert_true(autoreload_ready);
+	zassert_equal(0U, fake_autoreload_writes);
+
+	/* The imminent old match is then announced using its original period. */
+	fake_arrm_active = true;
+	fake_arrok_active = true;
+	zassert_true(lptim_handle_arrok());
+	zassert_equal(100U, fake_autoreload);
+	zassert_true(autoreload_ready);
+	lptim_irq_handler(NULL);
+	zassert_false(fake_arrm_active);
+	zassert_equal(101U, accumulated_lptim_cnt);
+	zassert_equal(12U, fake_announced_ticks);
+
+	/* A queued reload with enough margin still applies normally. */
+	autoreload_ready = true;
+	fake_autoreload = 100U;
+	fake_counter = 90U;
+	fake_arrok_active = true;
+	fake_autoreload_writes = 0U;
+	zassert_true(lptim_handle_arrok());
+	zassert_equal(500U, fake_autoreload);
+	zassert_false(autoreload_ready);
+	zassert_equal(1U, fake_autoreload_writes);
+
+	/* A queued deadline that elapsed during ARROK wait must fire promptly. */
+	autoreload_ready = true;
+	autoreload_next = 70U;
+	fake_autoreload = 100U;
+	fake_counter = 80U;
+	fake_arrok_active = true;
+	fake_autoreload_writes = 0U;
+	zassert_true(lptim_handle_arrok());
+	zassert_equal(82U, autoreload_next);
+	zassert_equal(82U, fake_autoreload);
+	zassert_equal(1U, fake_autoreload_writes);
+}
+
+ZTEST(stm32_lptim_timer, test_arrok_near_new_match_clamps_queued_deadline)
+{
+	autoreload_ready = true;
+	autoreload_next = 81U;
+	fake_autoreload = 100U;
+	fake_counter = 80U;
+	fake_arrm_active = false;
+	fake_arrok_active = true;
+	fake_arrok_enabled = true;
+	fake_autoreload_writes = 0U;
+
+	zassert_true(lptim_handle_arrok());
+	zassert_equal(82U, autoreload_next);
+	zassert_equal(82U, fake_autoreload);
+	zassert_equal(1U, fake_autoreload_writes);
+}
+
 ZTEST(stm32_lptim_timer, test_cycle_get_64_scales_before_widened_product_overflows)
 {
 	uint64_t expected = 2147483648000000ULL;
