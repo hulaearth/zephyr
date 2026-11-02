@@ -58,46 +58,15 @@ static struct retained_xspi_state retained_xspi;
 static uint32_t retained_xspi_canary[RETAINED_STOP_XSPI_CANARY_WORDS];
 
 static volatile bool stop_enabled;
-static volatile struct stm32n6_retained_stop_stats stop_stats;
-
-static inline void saturating_increment(volatile uint32_t *value)
-{
-	if (*value != UINT32_MAX) {
-		++*value;
-	}
-}
-
 int stm32n6_retained_stop_set_enabled(bool enabled)
 {
 	unsigned int key = irq_lock();
 
-	if (enabled) {
-		stop_stats.last_rejection = STM32N6_RETAINED_STOP_REJECTION_NONE;
-		stop_stats.pending_before_wfi = 0U;
-		stop_stats.pending_after_wfi = 0U;
-	}
 	stop_enabled = enabled;
 	irq_unlock(key);
 	return 0;
 }
 
-void stm32n6_retained_stop_get_stats(struct stm32n6_retained_stop_stats *stats)
-{
-	if (stats == NULL) {
-		return;
-	}
-
-	unsigned int key = irq_lock();
-
-	stats->attempts = stop_stats.attempts;
-	stats->entries = stop_stats.entries;
-	stats->wakes = stop_stats.wakes;
-	stats->rejections = stop_stats.rejections;
-	stats->last_rejection = stop_stats.last_rejection;
-	stats->pending_before_wfi = stop_stats.pending_before_wfi;
-	stats->pending_after_wfi = stop_stats.pending_after_wfi;
-	irq_unlock(key);
-}
 
 static bool gpdma_channel_enabled(void)
 {
@@ -463,7 +432,6 @@ void pm_state_set(enum pm_state state, uint8_t substate_id)
 	struct lptim_wake_gates lptim_gates;
 	struct stop_register_state saved;
 
-	saturating_increment(&stop_stats.attempts);
 	saved.scr = SCB->SCR & STOP_SCR_MASK;
 	key = arch_pm_state_set_prepare();
 	const bool enabled = stop_enabled;
@@ -473,22 +441,16 @@ void pm_state_set(enum pm_state state, uint8_t substate_id)
 		snapshot_stop_register_state(&saved);
 		have_saved_state = true;
 		eligible = retained_profile_ready();
-		if (!eligible) {
-			stop_stats.last_rejection = STM32N6_RETAINED_STOP_REJECTION_PROFILE;
-		} else if (gpdma_channel_enabled()) {
+		if (eligible && gpdma_channel_enabled()) {
 			eligible = false;
-			stop_stats.last_rejection = STM32N6_RETAINED_STOP_REJECTION_DMA_ACTIVE;
-		} else {
+		} else if (eligible) {
 			snapshot_xspi_configuration();
 		}
-	} else if (enabled) {
-		stop_stats.last_rejection = STM32N6_RETAINED_STOP_REJECTION_INELIGIBLE;
 	}
 	if (!eligible) {
 		if (have_saved_state && !restore_stop_register_state(&saved)) {
 			retained_stop_fail_stop();
 		}
-		saturating_increment(&stop_stats.rejections);
 		LL_LPM_EnableSleep();
 		__DSB();
 		__ISB();
@@ -500,12 +462,10 @@ void pm_state_set(enum pm_state state, uint8_t substate_id)
 
 	/* Save and temporarily open documented LPTIM1 Stop wake gates. */
 	if (!prepare_lptim_wake_gates(&lptim_gates)) {
-		stop_stats.last_rejection = STM32N6_RETAINED_STOP_REJECTION_WAKE_GATES;
 		if (!restore_lptim_wake_gates(&lptim_gates) ||
 		    !restore_stop_register_state(&saved)) {
 			retained_stop_fail_stop();
 		}
-		saturating_increment(&stop_stats.rejections);
 		LL_LPM_EnableSleep();
 		__DSB();
 		__ISB();
@@ -525,12 +485,10 @@ void pm_state_set(enum pm_state state, uint8_t substate_id)
 	    LL_PWR_GetStopModeRegulVoltageScaling() != LL_PWR_REGU_STOP_VOLTAGE_SCALE3 ||
 	    LL_RCC_HSI_IsEnabledInStopMode() != 1U || !__HAL_RCC_BSEC_IS_CLK_ENABLED() ||
 	    !__HAL_RCC_BSEC_IS_CLK_SLEEP_ENABLED()) {
-		stop_stats.last_rejection = STM32N6_RETAINED_STOP_REJECTION_POWER_CONFIG;
 		if (!restore_lptim_wake_gates(&lptim_gates) ||
 		    !restore_stop_register_state(&saved)) {
 			retained_stop_fail_stop();
 		}
-		saturating_increment(&stop_stats.rejections);
 		LL_LPM_EnableSleep();
 		__DSB();
 		__ISB();
@@ -552,27 +510,21 @@ void pm_state_set(enum pm_state state, uint8_t substate_id)
 	LL_LPM_DisableEventOnPend();
 	LL_LPM_DisableSleepOnExit();
 	LL_LPM_EnableDeepSleep();
-	stop_stats.pending_before_wfi = SCB->ICSR;
 	__DSB();
 	__ISB();
 	__WFI();
 	if (LL_PWR_IsActiveFlag_STOP() == 0U) {
-		stop_stats.pending_after_wfi = SCB->ICSR;
-		stop_stats.last_rejection = STM32N6_RETAINED_STOP_REJECTION_STOP_FLAG;
 		if (!restore_retained_memory_clock_path() || !restore_xspi_mapping_and_verify() ||
 		    !restore_lptim_wake_gates(&lptim_gates) ||
 		    !restore_stop_register_state(&saved) ||
 		    !restore_original_vectors(original_vtor)) {
 			retained_stop_fail_stop();
 		}
-		saturating_increment(&stop_stats.rejections);
 		LL_LPM_EnableSleep();
 		SCB->SCR = (SCB->SCR & ~STOP_SCR_MASK) | saved.scr;
 		arch_pm_state_set_finish(key);
 		return;
 	}
-	saturating_increment(&stop_stats.entries);
-	stop_stats.last_rejection = STM32N6_RETAINED_STOP_REJECTION_NONE;
 
 	/* Stay in the internal-SRAM relocation closure until memory is verified. */
 	LL_LPM_EnableSleep();
@@ -582,6 +534,5 @@ void pm_state_set(enum pm_state state, uint8_t substate_id)
 		retained_stop_fail_stop();
 	}
 
-	saturating_increment(&stop_stats.wakes);
 	arch_pm_state_set_finish(key);
 }
