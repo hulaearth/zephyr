@@ -1055,6 +1055,13 @@ static int stm32_sai_sub_conf(const struct device *dev, enum i2s_dir dir,
 
 	stream->state = I2S_STATE_READY;
 
+#if defined(CONFIG_I2S_STM32_SAI_CONTINUOUS_RX_N6)
+	if (stream->continuous_rx) {
+		/* Start clocks only after DMA is armed, preserving the first slot. */
+		return 0;
+	}
+#endif
+
 	/*
 	 * Enable immediately SAI peripheral only when the bit clock is not gated.
 	 * It allows the synchronous sub-block to become operational immediately.
@@ -1209,6 +1216,16 @@ static int continuous_rx_start(const struct device *dev)
 		    stream->continuous_blocks[i] != NULL) {
 			return -EBUSY;
 		}
+	}
+
+	/* HAL stop waits for SAIEN to clear, disables DMA requests and flushes
+	 * the FIFO. No stale or partially consumed frame may precede slot zero.
+	 * Do this on every start, including a restart after boundary quiescence.
+	 */
+	if (HAL_SAI_DMAStop(hsai) != HAL_OK) {
+		stream->continuous_fault = true;
+		stream->state = I2S_STATE_ERROR;
+		return -EIO;
 	}
 
 	memset(&stream->continuous_queue, 0, sizeof(stream->continuous_queue));
