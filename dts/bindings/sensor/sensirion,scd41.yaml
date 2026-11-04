@@ -15,7 +15,12 @@ properties:
       - 0: Normal periodic measurement. Default interval of 5sec
       - 1: Low power periodic measurement. Interval of 30sec
       - 2: Singleshot measurement for low power usage.
+      - 3: Single shot, retaining powered idle and ASC state between conversions.
+           The first conversion after initialization is discarded. Fetch blocks
+           for two 5-second conversions initially and one thereafter.
+           The application owns sampling cadence; no power-down is issued.
     enum:
       - 0
       - 1
       - 2
+      - 3
