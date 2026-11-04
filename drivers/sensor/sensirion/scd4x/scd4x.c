@@ -167,6 +167,8 @@ static int scd4x_setup_measurement(const struct device *dev)
 			return ret;
 		}
 		break;
+	case SCD4X_MODE_SINGLE_SHOT_RETAINED_IDLE:
+		return cfg->model == SCD4X_MODEL_SCD41 ? 0 : -ENOTSUP;
 	case SCD4X_MODE_SINGLE_SHOT:
 		ret = scd4x_write_command(dev, SCD4X_CMD_POWER_DOWN);
 		if (ret < 0) {
@@ -185,6 +187,9 @@ static int scd4x_set_idle_mode(const struct device *dev)
 	const struct scd4x_config *cfg = dev->config;
 	int ret;
 
+	if (cfg->mode == SCD4X_MODE_SINGLE_SHOT_RETAINED_IDLE) {
+		return cfg->model == SCD4X_MODEL_SCD41 ? 0 : -ENOTSUP;
+	}
 	if (cfg->mode == SCD4X_MODE_SINGLE_SHOT) {
 		/*send wake up command twice because of an expected nack return in power down mode*/
 		scd4x_write_command(dev, SCD4X_CMD_WAKE_UP);
@@ -568,6 +573,43 @@ int scd4x_factory_reset(const struct device *dev)
 	return 0;
 }
 
+/* The application serializes all fetch/attribute operations for this device. */
+static int scd4x_fetch_retained_idle(const struct device *dev)
+{
+	const struct scd4x_config *cfg = dev->config;
+	struct scd4x_data *data = dev->data;
+	int ret;
+
+	if (cfg->model != SCD4X_MODEL_SCD41) {
+		return -ENOTSUP;
+	}
+	data->retained_idle_sample_valid = false;
+	/* Sensirion recommends discarding the first shot after power-up.
+	 * Conservatively repeat priming after driver initialization/reinit, never
+	 * on an application publication pause or restart while still powered.
+	 */
+	if (!data->retained_idle_primed) {
+		ret = scd4x_write_command(dev, SCD4X_CMD_MEASURE_SINGLE_SHOT);
+		if (ret < 0) {
+			return ret;
+		}
+		ret = scd4x_read_sample(dev);
+		if (ret < 0) {
+			return ret;
+		}
+		data->retained_idle_primed = true;
+	}
+	ret = scd4x_write_command(dev, SCD4X_CMD_MEASURE_SINGLE_SHOT);
+	if (ret < 0) {
+		return ret;
+	}
+	ret = scd4x_read_sample(dev);
+	if (ret == 0) {
+		data->retained_idle_sample_valid = true;
+	}
+	return ret;
+}
+
 static int scd4x_sample_fetch(const struct device *dev, enum sensor_channel chan)
 {
 	const struct scd4x_config *cfg = dev->config;
@@ -579,6 +621,9 @@ static int scd4x_sample_fetch(const struct device *dev, enum sensor_channel chan
 		return -ENOTSUP;
 	}
 
+	if (cfg->mode == SCD4X_MODE_SINGLE_SHOT_RETAINED_IDLE) {
+		return scd4x_fetch_retained_idle(dev);
+	}
 	if (cfg->mode == SCD4X_MODE_SINGLE_SHOT) {
 		ret = scd4x_set_idle_mode(dev);
 		if (ret < 0) {
@@ -630,7 +675,13 @@ static int scd4x_channel_get(const struct device *dev, enum sensor_channel chan,
 			     struct sensor_value *val)
 {
 	const struct scd4x_data *data = dev->data;
+	const struct scd4x_config *cfg = dev->config;
 	int64_t tmp_val;
+
+	if (cfg->mode == SCD4X_MODE_SINGLE_SHOT_RETAINED_IDLE &&
+	    !data->retained_idle_sample_valid) {
+		return -ENODATA;
+	}
 
 	switch ((enum sensor_channel)chan) {
 	case SENSOR_CHAN_AMBIENT_TEMP:
@@ -849,8 +900,15 @@ static int scd4x_attr_get(const struct device *dev, enum sensor_channel chan,
 static int scd4x_init(const struct device *dev)
 {
 	const struct scd4x_config *cfg = dev->config;
+	struct scd4x_data *data = dev->data;
 	int ret;
 
+	data->retained_idle_primed = false;
+	data->retained_idle_sample_valid = false;
+	if (cfg->mode == SCD4X_MODE_SINGLE_SHOT_RETAINED_IDLE &&
+	    cfg->model != SCD4X_MODEL_SCD41) {
+		return -ENOTSUP;
+	}
 	if (!i2c_is_ready_dt(&cfg->bus)) {
 		LOG_ERR_DEVICE_NOT_READY(cfg->bus.bus);
 		return -ENODEV;

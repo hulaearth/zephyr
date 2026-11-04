@@ -58,6 +58,7 @@ enum scd4x_mode_t {
 	SCD4X_MODE_NORMAL,
 	SCD4X_MODE_LOW_POWER,
 	SCD4X_MODE_SINGLE_SHOT,
+	SCD4X_MODE_SINGLE_SHOT_RETAINED_IDLE,
 };
 
 struct scd4x_config {
@@ -70,6 +71,8 @@ struct scd4x_data {
 	uint16_t temp_sample;
 	uint16_t humi_sample;
 	uint16_t co2_sample;
+	bool retained_idle_primed;
+	bool retained_idle_sample_valid;
 };
 
 struct cmds_t {
