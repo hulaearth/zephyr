@@ -1173,12 +1173,27 @@ static int pm_action(const struct device *dev, enum pm_device_action action)
 			LOG_ERR("failed to enter normal mode: %d", ret);
 		}
 		break;
-	case PM_DEVICE_ACTION_SUSPEND:
+	case PM_DEVICE_ACTION_SUSPEND: {
+		struct bmm350_pmu_cmd_status_0 status = {0};
+
 		ret = bmm350_set_powermode(dev, BMM350_SUSPEND_MODE);
+		if (ret == 0) {
+			k_usleep(BMM350_GOTO_SUSPEND_DELAY);
+			ret = bmm350_get_pmu_cmd_status_0(dev, &status);
+		}
+		if (ret == 0 && (status.pmu_cmd_busy || status.cmd_is_illegal ||
+				status.pwr_mode_is_normal || status.pmu_cmd_value != BMM350_PMU_CMD_SUS)) {
+			ret = -EIO;
+		}
 		if (ret != 0) {
-			LOG_ERR("failed to enter suspend mode: %d", ret);
+			LOG_ERR("failed to verify suspend mode: %d", ret);
+		} else {
+			LOG_INF("suspend verified busy=%u normal=%u command=%u",
+				status.pmu_cmd_busy, status.pwr_mode_is_normal,
+				status.pmu_cmd_value);
 		}
 		break;
+	}
 	default:
 		return -ENOTSUP;
 	}
