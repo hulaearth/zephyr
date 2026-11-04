@@ -270,6 +270,12 @@ void HAL_SAI_RxCpltCallback(SAI_HandleTypeDef *hsai)
 		goto exit;
 	}
 
+#if defined(CONFIG_SOC_SERIES_STM32N6X)
+	/* The queue (or its reader) now owns the completed block. */
+	stream->mem_block = NULL;
+	stream->mem_block_len = 0U;
+#endif
+
 	if (stream->state == I2S_STATE_STOPPING) {
 		stream->state = I2S_STATE_READY;
 		LOG_DBG("Stopping RX ...");
@@ -1497,6 +1503,18 @@ static int stream_start(const struct device *dev, enum i2s_dir dir)
 		}
 #endif
 
+#if defined(CONFIG_SOC_SERIES_STM32N6X)
+		/* Continuous bit clock can fill the RX FIFO between sessions. Reset
+		 * it before arming DMA so stale half-frames cannot swap channels.
+		 */
+		if (HAL_SAI_DMAStop(hsai) != HAL_OK) {
+			LOG_ERR("Failed to reset RX DMA and FIFO");
+			return -EIO;
+		}
+		__HAL_SAI_CLEAR_FLAG(hsai, SAI_FLAG_OVRUDR | SAI_FLAG_WCKCFG |
+				   SAI_FLAG_AFSDET | SAI_FLAG_LFSDET);
+#endif
+
 		ret = k_mem_slab_alloc(stream->i2s_cfg.mem_slab, &stream->mem_block, K_NO_WAIT);
 		if (ret < 0) {
 			return -ENOMEM;
@@ -1802,6 +1820,40 @@ static int stm32_sai_sub_trigger(const struct device *dev, enum i2s_dir dir,
 				return ret;
 			}
 			key = irq_lock();
+		}
+#endif
+
+#if defined(CONFIG_SOC_SERIES_STM32N6X)
+		if (dir == I2S_DIR_RX
+#if defined(CONFIG_I2S_STM32_SAI_CONTINUOUS_RX_N6)
+		    && !stream->continuous_rx
+#endif
+		) {
+			/* Suppress completion callbacks before stopping DMA. HAL waits
+			 * for hardware, so do not hold the interrupt lock across it.
+			 */
+			const bool keep_clock =
+				(sub_data->hsai.Instance->CR1 & SAI_xCR1_SAIEN) != 0U &&
+				((stream->i2s_cfg.options & I2S_OPT_BIT_CLK_GATED) == 0U ||
+				 sub_data->hsai.Init.Synchro == SAI_SYNCHRONOUS);
+
+			stream->state = I2S_STATE_ERROR;
+			irq_unlock(key);
+			ret = HAL_SAI_DMAStop(&sub_data->hsai);
+			key = irq_lock();
+			if (ret != HAL_OK) {
+				irq_unlock(key);
+				return -EIO;
+			}
+
+			if (stream->mem_block != NULL) {
+				k_mem_slab_free(stream->i2s_cfg.mem_slab, stream->mem_block);
+			}
+			stream->mem_block = NULL;
+			stream->mem_block_len = 0U;
+			if (keep_clock) {
+				__HAL_SAI_ENABLE(&sub_data->hsai);
+			}
 		}
 #endif
 
