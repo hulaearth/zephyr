@@ -710,6 +710,10 @@ static int lsm6dso_init_chip(const struct device *dev)
 	struct lsm6dso_data *lsm6dso = dev->data;
 	uint8_t chip_id, master_on;
 	uint8_t odr, fs;
+	lsm6dso_xl_hm_mode_t expected_pm, actual_pm;
+	lsm6dso_odr_xl_t actual_xl;
+	lsm6dso_odr_g_t actual_gy;
+	lsm6dso_fs_xl_t actual_fs;
 
 	/* All registers except 0x01 are different between banks, including the WHO_AM_I
 	 * register and the register used for a SW reset.  If the lsm6dso wasn't on the user
@@ -765,14 +769,18 @@ static int lsm6dso_init_chip(const struct device *dev)
 	switch (cfg->accel_pm) {
 	default:
 	case 0:
-		lsm6dso_xl_power_mode_set(ctx, LSM6DSO_HIGH_PERFORMANCE_MD);
+		expected_pm = LSM6DSO_HIGH_PERFORMANCE_MD;
 		break;
 	case 1:
-		lsm6dso_xl_power_mode_set(ctx, LSM6DSO_LOW_NORMAL_POWER_MD);
+		expected_pm = LSM6DSO_LOW_NORMAL_POWER_MD;
 		break;
 	case 2:
-		lsm6dso_xl_power_mode_set(ctx, LSM6DSO_ULTRA_LOW_POWER_MD);
+		expected_pm = LSM6DSO_ULTRA_LOW_POWER_MD;
 		break;
+	}
+
+	if (lsm6dso_xl_power_mode_set(ctx, expected_pm) != 0) {
+		return -EIO;
 	}
 
 	fs = cfg->accel_range & ACCEL_RANGE_MASK;
@@ -842,6 +850,20 @@ static int lsm6dso_init_chip(const struct device *dev)
 			return -EIO;
 		}
 	}
+
+	/* Verify the applied hardware state, including retained-rail warm starts. */
+	if (lsm6dso_xl_power_mode_get(ctx, &actual_pm) != 0 ||
+	    lsm6dso_xl_data_rate_get(ctx, &actual_xl) != 0 ||
+	    lsm6dso_gy_data_rate_get(ctx, &actual_gy) != 0 ||
+	    lsm6dso_xl_full_scale_get(ctx, &actual_fs) != 0 ||
+	    actual_pm != expected_pm || actual_xl != cfg->accel_odr ||
+	    actual_gy != cfg->gyro_odr || actual_fs != (cfg->accel_range & ACCEL_RANGE_MASK)) {
+		LOG_ERR("sensor power configuration readback failed");
+		return -EIO;
+	}
+	LOG_INF("power verified accel_pm=%u accel_odr=%u gyro_odr=%u accel_fs=%u",
+		(unsigned int)actual_pm, (unsigned int)actual_xl,
+		(unsigned int)actual_gy, (unsigned int)actual_fs);
 
 	return 0;
 }
