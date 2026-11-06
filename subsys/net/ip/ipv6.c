@@ -205,6 +205,151 @@ static inline bool ipv6_drop_on_unknown_option(struct net_pkt *pkt,
 	return true;
 }
 
+/* Hand one option to the callback with the cursor at its data, then move past
+ * the data whatever the callback consumed.
+ */
+static int ipv6_ext_hdr_option_handle(struct net_pkt *pkt, uint8_t hdr_type, uint8_t opt_type,
+				      uint8_t opt_len, net_ipv6_ext_hdr_option_cb_t cb,
+				      void *user_data)
+{
+	struct net_pkt_cursor data;
+	int ret = 0;
+
+	net_pkt_cursor_backup(pkt, &data);
+
+	if (opt_type != NET_IPV6_EXT_HDR_OPT_PADN) {
+		ret = cb(pkt, hdr_type, opt_type, opt_len, user_data);
+	}
+
+	net_pkt_cursor_restore(pkt, &data);
+
+	if (net_pkt_skip(pkt, opt_len) < 0) {
+		return -EINVAL;
+	}
+
+	return ret;
+}
+
+/* Walk the TLV options of a Hop-by-Hop or Destination Options header (RFC
+ * 8200 ch 4.2) with the cursor at its start, and leave it at the next header.
+ */
+static int ipv6_options_hdr_walk(struct net_pkt *pkt, uint8_t hdr_type, uint8_t *next_hdr,
+				 net_ipv6_ext_hdr_option_cb_t cb, void *user_data)
+{
+	uint8_t hdr_ext_len;
+	uint16_t left;
+	int ret = 0;
+
+	if (net_pkt_read_u8(pkt, next_hdr) < 0 || net_pkt_read_u8(pkt, &hdr_ext_len) < 0) {
+		return -EINVAL;
+	}
+
+	/* The length is in 8 octet units, not counting the first 8 octets */
+	left = (hdr_ext_len + 1U) * 8U - 2U;
+
+	while (left > 0U && ret == 0) {
+		uint8_t opt_type;
+		uint8_t opt_len;
+
+		if (net_pkt_read_u8(pkt, &opt_type) < 0) {
+			return -EINVAL;
+		}
+
+		left--;
+
+		if (opt_type == NET_IPV6_EXT_HDR_OPT_PAD1) {
+			continue;
+		}
+
+		if (left == 0U || net_pkt_read_u8(pkt, &opt_len) < 0) {
+			return -EINVAL;
+		}
+
+		left--;
+
+		if (opt_len > left) {
+			return -EINVAL;
+		}
+
+		ret = ipv6_ext_hdr_option_handle(pkt, hdr_type, opt_type, opt_len, cb, user_data);
+		left -= opt_len;
+	}
+
+	return ret;
+}
+
+/* Step over a Routing or Fragment header with the cursor at its start, and
+ * leave it at the next header.
+ */
+static int ipv6_ext_hdr_skip(struct net_pkt *pkt, uint8_t hdr_type, uint8_t *next_hdr)
+{
+	uint8_t hdr_ext_len;
+	size_t rest;
+
+	if (net_pkt_read_u8(pkt, next_hdr) < 0) {
+		return -EINVAL;
+	}
+
+	if (hdr_type == NET_IPV6_NEXTHDR_FRAG) {
+		/* A Fragment header is always 8 octets long */
+		rest = 8U - sizeof(*next_hdr);
+	} else {
+		/* A Routing header is (hdr_ext_len + 1) * 8 octets long */
+		if (net_pkt_read_u8(pkt, &hdr_ext_len) < 0) {
+			return -EINVAL;
+		}
+
+		rest = (hdr_ext_len + 1U) * 8U - sizeof(*next_hdr) - sizeof(hdr_ext_len);
+	}
+
+	if (net_pkt_skip(pkt, rest) < 0) {
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
+int net_ipv6_parse_ext_hdr_options(struct net_pkt *pkt, net_ipv6_ext_hdr_option_cb_t cb,
+				   void *user_data)
+{
+	struct net_pkt_cursor backup;
+	uint8_t next_hdr;
+	int ret = -EINVAL;
+
+	net_pkt_cursor_backup(pkt, &backup);
+	net_pkt_cursor_init(pkt);
+
+	if (net_pkt_skip(pkt, offsetof(struct net_ipv6_hdr, nexthdr)) < 0 ||
+	    net_pkt_read_u8(pkt, &next_hdr) < 0 ||
+	    net_pkt_skip(pkt, sizeof(struct net_ipv6_hdr) - offsetof(struct net_ipv6_hdr, nexthdr) -
+				  sizeof(next_hdr)) < 0) {
+		goto out;
+	}
+
+	ret = 0;
+
+	while (ret == 0) {
+		switch (next_hdr) {
+		case NET_IPV6_NEXTHDR_HBHO:
+		case NET_IPV6_NEXTHDR_DESTO:
+			ret = ipv6_options_hdr_walk(pkt, next_hdr, &next_hdr, cb, user_data);
+			break;
+		case NET_IPV6_NEXTHDR_ROUTING:
+		case NET_IPV6_NEXTHDR_FRAG:
+			ret = ipv6_ext_hdr_skip(pkt, next_hdr, &next_hdr);
+			break;
+		default:
+			/* The upper layer header */
+			goto out;
+		}
+	}
+
+out:
+	net_pkt_cursor_restore(pkt, &backup);
+
+	return ret;
+}
+
 static inline int ipv6_handle_ext_hdr_options(struct net_pkt *pkt,
 					      struct net_ipv6_hdr *hdr,
 					      uint16_t pkt_len)
@@ -304,7 +449,7 @@ static inline int ipv6_handle_ext_hdr_options(struct net_pkt *pkt,
 	return exthdr_len;
 }
 
-#if defined(CONFIG_NET_IPV6_ROUTE)
+#if defined(CONFIG_NET_IPV6_FORWARDING)
 static struct net_route_entry *add_route(struct net_if *iface,
 					 struct net_in6_addr *addr,
 					 uint8_t prefix_len)
@@ -325,7 +470,7 @@ static struct net_route_entry *add_route(struct net_if *iface,
 
 	return route;
 }
-#endif /* CONFIG_NET_IPV6_ROUTE */
+#endif /* CONFIG_NET_IPV6_FORWARDING */
 
 static void ipv6_no_route_info(struct net_pkt *pkt,
 			       const uint8_t *src,
@@ -336,7 +481,7 @@ static void ipv6_no_route_info(struct net_pkt *pkt,
 		net_sprint_ipv6_addr(dst));
 }
 
-#if defined(CONFIG_NET_IPV6_ROUTE)
+#if defined(CONFIG_NET_IPV6_FORWARDING)
 static enum net_verdict ipv6_route_packet(struct net_pkt *pkt,
 					  struct net_ipv6_hdr *hdr)
 {
@@ -345,23 +490,21 @@ static enum net_verdict ipv6_route_packet(struct net_pkt *pkt,
 	struct net_in6_addr src_ip, dst_ip;
 	bool found;
 
+	if (net_ipv6_is_addr_unspecified_raw(hdr->dst)) {
+		goto drop;
+	}
+
 	net_ipv6_addr_copy_raw(src_ip.s6_addr, hdr->src);
 	net_ipv6_addr_copy_raw(dst_ip.s6_addr, hdr->dst);
 
 	/* Check if the packet can be routed */
-	if (IS_ENABLED(CONFIG_NET_IPV6_FORWARDING)) {
-		found = net_route_ipv6_get_info(NULL, &dst_ip, &route, &nexthop);
-	} else {
-		found = net_route_ipv6_get_info(net_pkt_iface(pkt), &dst_ip,
-						&route, &nexthop);
-	}
+	found = net_route_ipv6_get_info(NULL, &dst_ip, &route, &nexthop);
 
 	if (found) {
 		int ret;
 
-		if (IS_ENABLED(CONFIG_NET_IPV6_FORWARDING) &&
-		    (net_ipv6_is_ll_addr(&src_ip) ||
-		     net_ipv6_is_ll_addr(&dst_ip))) {
+		if (net_ipv6_is_ll_addr(&src_ip) ||
+		    net_ipv6_is_ll_addr(&dst_ip)) {
 			/* RFC 4291 ch 2.5.6 */
 			ipv6_no_route_info(pkt, hdr->src, hdr->dst);
 
@@ -377,8 +520,7 @@ static enum net_verdict ipv6_route_packet(struct net_pkt *pkt,
 			net_pkt_set_iface(pkt, route->iface);
 		}
 
-		if (IS_ENABLED(CONFIG_NET_IPV6_FORWARDING) &&
-		    net_pkt_orig_iface(pkt) != net_pkt_iface(pkt) &&
+		if (net_pkt_orig_iface(pkt) != net_pkt_iface(pkt) &&
 		    !net_if_flag_is_set(net_pkt_orig_iface(pkt), NET_IF_IPV6_NO_ND)) {
 			/* If the route interface to destination is
 			 * different than the original route, then add
@@ -391,12 +533,11 @@ static enum net_verdict ipv6_route_packet(struct net_pkt *pkt,
 			add_route(net_pkt_orig_iface(pkt), &src_ip, 128);
 		}
 
-		if (IS_ENABLED(CONFIG_NET_IPV6_FORWARDING) &&
-		    net_pkt_orig_iface(pkt) != net_pkt_iface(pkt)) {
-			net_pkt_set_forwarding(pkt, true);
-		} else {
-			net_pkt_set_forwarding(pkt, false);
-		}
+		/* Re-sending a packet received for another host is forwarding
+		 * even when it leaves through the interface it arrived on. The
+		 * flag makes the send path decrement the hop limit.
+		 */
+		net_pkt_set_forwarding(pkt, true);
 
 		ret = net_route_ipv6_packet(pkt, nexthop);
 		if (ret < 0) {
@@ -441,7 +582,7 @@ static inline enum net_verdict ipv6_route_packet(struct net_pkt *pkt,
 	return NET_DROP;
 }
 
-#endif /* CONFIG_NET_IPV6_ROUTE */
+#endif /* CONFIG_NET_IPV6_FORWARDING */
 
 
 static enum net_verdict ipv6_forward_mcast_packet(struct net_pkt *pkt,

@@ -13,6 +13,7 @@
 LOG_MODULE_REGISTER(net_test, NET_LOG_LEVEL);
 
 #include <zephyr/types.h>
+#include <inttypes.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <string.h>
@@ -28,6 +29,8 @@ LOG_MODULE_REGISTER(net_test, NET_LOG_LEVEL);
 #include <zephyr/net_buf.h>
 #include <zephyr/net/net_ip.h>
 #include <zephyr/net/net_if.h>
+#include <zephyr/net/net_mgmt.h>
+#include <zephyr/net/net_stats.h>
 
 #define NET_LOG_ENABLED 1
 #include "net_private.h"
@@ -256,7 +259,7 @@ static int eth_fake_set_config(const struct device *dev,
 		break;
 
 	default:
-		return -EINVAL;
+		return -ENOTSUP;
 	}
 
 	return 0;
@@ -395,9 +398,11 @@ static void *iface_setup(void)
 		      "Invalid operational state (%d)",
 		      net_if_oper_state(iface1));
 
-	/* Mark the device ready and take the interface up */
-	dev->state->init_res = 0;
+	/* Make the device ready and take the interface up */
 	device_ok = true;
+	ret = device_init(dev);
+	zassert_equal(ret, 0, "Device init failed (%d)", ret);
+	zassert_true(device_is_ready(dev), "Device %s (%p) is not ready!", dev->name, dev);
 
 	/* The interface init was skipped because device was not ready during
 	 * system initialization. Now that the device is ready, we need to
@@ -677,6 +682,30 @@ ZTEST(net_iface, test_send_iface3)
 	ret = send_iface(iface3, 3, false);
 
 	zassert_true(ret, "iface 3");
+}
+
+ZTEST(net_iface, test_send_bytes_sent)
+{
+	struct net_stats_bytes before;
+	struct net_stats_bytes after;
+	int ret;
+
+	ret = net_mgmt(NET_REQUEST_STATS_GET_BYTES, iface2, &before, sizeof(before));
+	zassert_equal(ret, 0, "Cannot read the statistics (%d)", ret);
+
+	zassert_true(send_iface(iface2, 2, false), "iface 2");
+
+	/* The driver signals the test before net_if_tx() has updated the
+	 * statistics, so give the TX thread time to finish.
+	 */
+	k_msleep(WAIT_TIME);
+
+	ret = net_mgmt(NET_REQUEST_STATS_GET_BYTES, iface2, &after, sizeof(after));
+	zassert_equal(ret, 0, "Cannot read the statistics (%d)", ret);
+
+	/* send_iface() sends a 5 byte packet */
+	zexpect_equal(after.sent - before.sent, 5U, "Wrong sent byte count %" PRIu64,
+		      after.sent - before.sent);
 }
 
 static void send_iface1_down(void)
@@ -1668,15 +1697,20 @@ ZTEST(net_iface, test_ipv6_iid_stable)
 #if defined(CONFIG_NET_IPV6_IID_STABLE)
 	struct net_in6_addr iid_addr = { };
 	struct net_in6_addr expected_addr = { };
+	struct net_in6_addr again_addr = { };
 
 	generate_iid(eth_iface, &expected_addr, &iid_addr);
 
-	/* Make sure that EUI-64 bytes are not there */
-	zassert_not_equal(iid_addr.s6_addr[11], 0xff);
-	zassert_not_equal(iid_addr.s6_addr[12], 0xfe);
-
+	/* The IID is random, so compare the whole IID; any single byte can
+	 * match the EUI-64 pattern by chance.
+	 */
 	zassert_true(memcmp(&expected_addr, &iid_addr, sizeof(struct net_in6_addr)) != 0,
 		     "IID is EUI-64 instead of randomized");
+
+	generate_iid(eth_iface, &expected_addr, &again_addr);
+
+	zassert_mem_equal(&iid_addr, &again_addr, sizeof(struct net_in6_addr),
+			  "IID is not stable for the same inputs");
 #else
 	ztest_test_skip();
 #endif

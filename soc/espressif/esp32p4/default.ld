@@ -361,10 +361,13 @@ SECTIONS
     . = ALIGN(4);
 
     _init_end = ABSOLUTE(.);
+    MPU_MIN_SIZE_ALIGN
     _iram_text_start = ABSOLUTE(.);
 
     *(.iram1 .iram1.*)
     *(.iram0.literal .iram.literal .iram.text.literal .iram0.text .iram.text)
+    /* Input sections named with zephyr_linker_sources(RAMFUNC_SECTION ...) */
+    #include <snippets-ramfunc-section.ld>
     *(.tcm.text .tcm.text.*)
     *(.spm.text .spm.text.*)
     *libzephyr.a:panic.*(.literal .text .literal.* .text.*)
@@ -432,6 +435,9 @@ SECTIONS
     *libzephyr.a:flash_ops.*(.literal .literal.* .text .text.*)
     *libzephyr.a:spi_flash_os_func_app.*(.literal .literal.* .text .text.*)
     *libzephyr.a:spi_flash_os_func_noos.*(.literal .literal.* .text .text.*)
+#if defined(CONFIG_ESP32_SLEEP_SET_FLASH_DPD)
+    *libzephyr.a:spi_flash_dpd_enable.*(.literal .literal.* .text .text.*)
+#endif
     *libzephyr.a:flash_mmap.*(.literal .text .literal.* .text.*)
     *libzephyr.a:esp_flash_api.*(.literal .text .literal.* .text.*)
 
@@ -564,6 +570,7 @@ SECTIONS
   .iram0.text_end (NOLOAD) :
   {
     . = ALIGN(16);
+    MPU_MIN_SIZE_ALIGN
     _iram_text_end = ABSOLUTE(.);
   } GROUP_LINK_IN(RAMABLE_REGION)
 
@@ -670,6 +677,9 @@ SECTIONS
     *libzephyr.a:flash_qio_mode.*(.rodata .rodata.* .srodata .srodata.*)
     *libzephyr.a:spi_flash_os_func_app.*(.rodata .rodata.* .srodata .srodata.*)
     *libzephyr.a:spi_flash_os_func_noos.*(.rodata .rodata.* .srodata .srodata.*)
+#if defined(CONFIG_ESP32_SLEEP_SET_FLASH_DPD)
+    *libzephyr.a:spi_flash_dpd_enable.*(.rodata .rodata.* .srodata .srodata.*)
+#endif
     *libzephyr.a:flash_mmap.*(.rodata .rodata.* .srodata .srodata.*)
     *libzephyr.a:esp_flash_api.*(.rodata .rodata.* .srodata .srodata.*)
 
@@ -913,12 +923,12 @@ SECTIONS
 
     /* Enforce flash segment size alignment */
     . = ALIGN(0x10);
+    /* Align for PMP granularity requirements */
+    MPU_MIN_SIZE_ALIGN
 
     _instruction_reserved_end = ABSOLUTE(.);
     _text_end = ABSOLUTE(.);
     __text_region_end = ABSOLUTE(.);
-    /* Align for PMP granularity requirements */
-    MPU_MIN_SIZE_ALIGN
     __rom_region_end = ABSOLUTE(.);
     __rom_region_size = ABSOLUTE(__rom_region_end - __rom_region_start);
     _etext = .;
@@ -1017,6 +1027,8 @@ SECTIONS
   {
     /* Enforce flash segment size alignment */
     LONG(0);
+    /* Align for PMP granularity requirements */
+    MPU_MIN_SIZE_ALIGN
     _rodata_reserved_end = ABSOLUTE(.);
     _image_rodata_end = ABSOLUTE(.);
     /* The read-only region must span the linker-collected rom sections too:

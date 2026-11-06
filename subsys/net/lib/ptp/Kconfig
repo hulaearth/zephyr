@@ -59,6 +59,11 @@ config PTP_MSG_POLL_SIZE
 	  PTP messages are allocated dynamically from memory slab. The Kconfig symbol
 	  defines number of blocks in the memory slab.
 
+	  Half of the messages can be used for the Announce messages kept in
+	  the foreign timeTransmitter records of all PTP Ports. A PTP Port keeps
+	  up to three of them for its current timeTransmitter, so raise the
+	  value when more PTP Ports are used.
+
 choice
 	prompt "PTP Clock Type"
 	default PTP_ORDINARY_CLOCK
@@ -193,6 +198,7 @@ config PTP_UDP_IPV6_PROTOCOL
 	bool "UDP with IPv6"
 	depends on NET_IPV6
 	select NET_IPV6_MLD
+	select NET_CONTEXT_RECV_PKTINFO
 
 config PTP_IEEE_802_3_PROTOCOL
 	bool "IEEE 802.3 (Layer 2 / EtherType 0x88F7)"

@@ -23,12 +23,14 @@ import os
 import re
 
 import pytest
+from spdx_tools.spdx.model import ExternalPackageRefCategory
 from spdx_tools.spdx.model.checksum import ChecksumAlgorithm
 from spdx_tools.spdx.model.package import PackagePurpose
 from spdx_tools.spdx.model.relationship import RelationshipType
 
 ZEPHYR_ORGANIZATION = "The Zephyr Project"
 SPDX_TOOL_PREFIX = "Zephyr SPDX builder"
+CPE_ZEPHYR_PREFIX = "cpe:2.3:o:zephyrproject:zephyr:"
 UTILITY_TARGETS = {
     "run",
     "flash",
@@ -147,6 +149,22 @@ def first_module_sources_package(zephyr_doc):
     )
 
 
+def get_cpe_refs(package):
+    """Collect CPE 2.3 external references from a package."""
+    return [
+        ref.locator
+        for ref in package.external_references
+        if ref.category == ExternalPackageRefCategory.SECURITY and ref.reference_type == "cpe23Type"
+    ]
+
+
+def expected_zephyr_cpe(zephyr_version):
+    """Build the CPE expected for a Zephyr version, with any pre-release qualifier
+    moved to the CPE 'update' field."""
+    release, _, update = zephyr_version.partition("-")
+    return f"{CPE_ZEPHYR_PREFIX}{release}:{update or '-'}:*:*:*:*:*:*"
+
+
 class TestCreators:
     """Tests that creator information reflects the tree the SBOM was generated from."""
 
@@ -160,6 +178,43 @@ class TestCreators:
         assert expected_tool in creators, (
             f"modules-deps.spdx: expected '{expected_tool}', got {creators}"
         )
+
+
+class TestZephyrIdentity:
+    """Tests that the Zephyr packages identify the version of the tree that was built.
+
+    Which release tag, remote and revision a purl ends up pinned to depends on the
+    checkout, and is covered by scripts/tests/zspdx; what only a build can show is
+    that both packages report the version this tree carries, and the CPE matching it.
+    """
+
+    @pytest.fixture(
+        params=[
+            pytest.param(("zephyr.spdx", "zephyr-sources"), id="zephyr-sources"),
+            pytest.param(("modules-deps.spdx", "zephyr-deps"), id="zephyr-deps"),
+        ]
+    )
+    def zephyr_package(self, request, zephyr_doc, modules_doc):
+        """The package describing Zephyr itself, in each document that carries one."""
+        doc_name, pkg_name = request.param
+        doc = zephyr_doc if doc_name == "zephyr.spdx" else modules_doc
+        if len(doc.packages) == 0:
+            pytest.skip(f"No packages in {doc_name}")
+        pkg = find_package_by_name(doc, pkg_name)
+        assert pkg is not None, f"{doc_name}: {pkg_name} package not found"
+        return doc_name, pkg
+
+    def test_version_matches_the_tree(self, zephyr_package, zephyr_version):
+        doc_name, pkg = zephyr_package
+        assert pkg.version == zephyr_version, (
+            f"{doc_name}: {pkg.name} version is '{pkg.version}', expected '{zephyr_version}'"
+        )
+
+    def test_cpe_matches_the_tree(self, zephyr_package, zephyr_version):
+        doc_name, pkg = zephyr_package
+        expected = expected_zephyr_cpe(zephyr_version)
+        cpes = get_cpe_refs(pkg)
+        assert expected in cpes, f"{doc_name}: {pkg.name} missing CPE '{expected}', got {cpes}"
 
 
 class TestAppDocument:
@@ -223,11 +278,11 @@ class TestAppDocument:
         )
 
     def test_main_c_hash_correct(self, app_doc, source_dir):
-        """Test that main.c has the correct SHA1 and SHA256 hashes."""
+        """Test that main.c has the correct SHA1, SHA256 and SHA512 hashes."""
         main_c_spdx = find_file_by_name(app_doc, FILE_MAIN_C)
         assert main_c_spdx is not None, f"app.spdx: {FILE_MAIN_C} not found"
 
-        # Read file once for computing both hashes
+        # Read file once for computing all hashes
         main_c_path = os.path.join(source_dir, "src", "main.c")
         assert os.path.exists(main_c_path), f"Source file not found: {main_c_path}"
 
@@ -235,6 +290,7 @@ class TestAppDocument:
             file_content = f.read()
             expected_sha1 = hashlib.sha1(file_content, usedforsecurity=False).hexdigest()
             expected_sha256 = hashlib.sha256(file_content, usedforsecurity=False).hexdigest()
+            expected_sha512 = hashlib.sha512(file_content, usedforsecurity=False).hexdigest()
 
         # Validate SHA1 checksum
         sha1_checksums = [c for c in main_c_spdx.checksums if c.algorithm == ChecksumAlgorithm.SHA1]
@@ -254,6 +310,17 @@ class TestAppDocument:
         actual_sha256 = sha256_checksums[0].value
         assert actual_sha256 == expected_sha256, (
             f"app.spdx: main.c SHA256 mismatch. Expected '{expected_sha256}', got '{actual_sha256}'"
+        )
+
+        # Validate SHA512 checksum
+        sha512_checksums = [
+            c for c in main_c_spdx.checksums if c.algorithm == ChecksumAlgorithm.SHA512
+        ]
+        assert len(sha512_checksums) > 0, "app.spdx: main.c has no SHA512 checksum"
+
+        actual_sha512 = sha512_checksums[0].value
+        assert actual_sha512 == expected_sha512, (
+            f"app.spdx: main.c SHA512 mismatch. Expected '{expected_sha512}', got '{actual_sha512}'"
         )
 
     def test_main_c_license_correct(self, app_doc):
@@ -594,7 +661,7 @@ class TestBuildTraceability:
             f"got relationships to: {[r.related_spdx_element_id for r in generated_from_rels]}"
         )
 
-        # hould reference zephyr document for kernel sou uses the app document cross-reference
+        # Should reference zephyr document for kernel sou uses the app document cross-reference
         app_ref_id = find_doc_ref_id(build_doc, app_doc.creation_info.document_namespace)
         assert app_ref_id is not None, "build.spdx: no external reference to app document"
 

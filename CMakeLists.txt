@@ -687,6 +687,7 @@ elseif(NOT ZEPHYR_GIT_INDEX)
   endif()
 endif()
 
+zephyr_get(APP_BUILD_VERSION SYSBUILD LOCAL)
 if(DEFINED APP_BUILD_VERSION)
   set(app_build_version_argument "-DAPP_BUILD_VERSION=${APP_BUILD_VERSION}")
 endif()
@@ -2274,7 +2275,7 @@ if(LOG_DICT_DB_NAME_ARG)
       ${LOG_DICT_DB_NAME}
     )
   else()
-    # Seprate build target for generating logging dictionary database.
+    # Separate build target for generating logging dictionary database.
     # This needs to be explicitly called/used to generate the database.
     add_custom_command(
       OUTPUT ${LOG_DICT_DB_NAME}

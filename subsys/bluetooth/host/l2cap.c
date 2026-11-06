@@ -470,6 +470,7 @@ void bt_l2cap_disconnected(struct bt_conn *conn)
 	}
 
 	SYS_SLIST_FOR_EACH_CONTAINER_SAFE(&conn->channels, chan, next, node) {
+		bt_l2cap_chan_remove(conn, chan);
 		l2cap_chan_del(chan);
 	}
 }
@@ -807,7 +808,7 @@ int bt_l2cap_send_pdu(struct bt_l2cap_le_chan *le_chan, struct net_buf *pdu,
 	make_closure(pdu->user_data, cb, user_data);
 	LOG_DBG("push: pdu %p len %d cb %p userdata %p", pdu, pdu->len, cb, user_data);
 
-	k_fifo_put(&le_chan->tx_queue, pdu);
+	k_fifo_put(&le_chan->tx_queue, net_buf_take(&pdu));
 
 	raise_data_ready(le_chan); /* tis just a flag */
 
@@ -996,6 +997,11 @@ struct net_buf *l2cap_data_pull(struct bt_conn *conn,
 		 */
 		LOG_DBG("no credits for new K-frame on %p", lechan);
 		lower_data_ready(lechan);
+
+		/* Another channel of this connection may have data to send:
+		 * re-trigger the TX processor to pull from it.
+		 */
+		bt_tx_irq_raise();
 		return NULL;
 	}
 
@@ -1359,6 +1365,14 @@ static void l2cap_chan_tx_give_credits(struct bt_l2cap_le_chan *chan,
 				       uint16_t credits)
 {
 	LOG_DBG("chan %p credits %u", chan, credits);
+
+	/* Connection requests and responses may carry 0 initial credits. Such
+	 * a channel is not sendable, and setting BT_L2CAP_STATUS_OUT for it
+	 * would keep the first real grant from resuming TX below.
+	 */
+	if (credits == 0U) {
+		return;
+	}
 
 	atomic_add(&chan->tx.credits, credits);
 
@@ -2858,7 +2872,7 @@ static void l2cap_chan_recv_queue(struct bt_l2cap_le_chan *chan,
 		return;
 	}
 
-	k_fifo_put(&chan->rx_queue, buf);
+	k_fifo_put(&chan->rx_queue, net_buf_take(&buf));
 	bt_work_submit(&chan->rx_work);
 }
 #endif /* CONFIG_BT_L2CAP_DYNAMIC_CHANNEL */
@@ -3445,7 +3459,7 @@ static int bt_l2cap_dyn_chan_send(struct bt_l2cap_le_chan *le_chan, struct net_b
 	net_buf_push_le16(buf, sdu_len);
 
 	/* Put buffer on TX queue */
-	k_fifo_put(&le_chan->tx_queue, buf);
+	k_fifo_put(&le_chan->tx_queue, net_buf_take(&buf));
 
 	/* Always process the queue in the same context */
 	raise_data_ready(le_chan);

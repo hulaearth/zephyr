@@ -60,7 +60,7 @@ extern "C" {
  *
  * @defgroup bt_gap Generic Access Profile (GAP)
  * @since 1.0
- * @version 1.1.1
+ * @version 1.1.2
  * @ingroup bluetooth
  * @{
  */
@@ -352,6 +352,9 @@ typedef void (*bt_ready_cb_t)(int err);
  * @retval -EALREADY Bluetooth is already enabled, or being enabled.
  * @retval -EAGAIN Bluetooth is being disabled; retry once bt_disable() has returned.
  * @retval -ENODEV The HCI driver is not ready.
+ * @retval -ETIMEDOUT The Controller did not respond to any command. The HCI transport is
+ *         closed, so bt_enable() can be called again without bt_disable(). With a @p cb,
+ *         the callback gets this error.
  */
 int bt_enable(bt_ready_cb_t cb);
 
@@ -858,6 +861,10 @@ enum bt_le_adv_opt {
 	 * @kconfig{CONFIG_BT_EXT_ADV} instead.
 	 *
 	 * @note Mutually exclusive with BT_LE_ADV_OPT_USE_IDENTITY.
+	 *
+	 * @note With @kconfig{CONFIG_BT_PRIVACY} and the legacy advertising
+	 *       commands, scanning uses the same NRPA, and connection creation
+	 *       fails while the advertiser is enabled.
 	 */
 	BT_LE_ADV_OPT_USE_NRPA = BIT(19),
 
@@ -2978,6 +2985,7 @@ struct bt_le_oob {
  *         different local identity address.
  *       - The local identity address conflicts with the local identity address used by other
  *         roles.
+ *       - Advertiser is enabled with @ref BT_LE_ADV_OPT_USE_NRPA.
  *
  * @note This function randomly generates cryptographic material used in the pairing process, and
  *       should be called again for each new pairing process.

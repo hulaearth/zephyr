@@ -317,6 +317,14 @@ config NET_IPV6_FRAGMENT_MAX_COUNT
 	  of memory so you need to plan this and increase the network buffer
 	  count.
 
+	  A datagram whose fragments never all arrive keeps its slot until
+	  NET_IPV6_FRAGMENT_TIMEOUT expires. While every slot is taken,
+	  fragments of any other datagram are dropped. With the default of
+	  one slot, a single incomplete datagram blocks all fragmented
+	  traffic for the whole timeout. Increase this value, or lower the
+	  timeout, if the device must keep receiving fragmented packets
+	  while stray or malicious fragments arrive.
+
 config NET_IPV6_FRAGMENT_MAX_PKT
 	int "How many fragments can be handled to reassemble a packet"
 	default 2
@@ -345,13 +353,41 @@ config NET_IPV6_FRAGMENT_TIMEOUT
 	  this might be too long in memory constrained devices. This value
 	  is in seconds.
 
+	  An incomplete datagram holds one of the NET_IPV6_FRAGMENT_MAX_COUNT
+	  slots for this long, so a shorter timeout frees slots faster at the
+	  cost of giving up on slow senders sooner.
+
 config NET_IPV6_MLD
 	bool "Multicast Listener Discovery support"
 	default y
 	help
 	  The value depends on your network needs. MLD should normally
-	  be active. Currently we support only MLDv2. See RFC 3810 for
-	  details.
+	  be active. The node speaks MLDv2 and falls back to MLDv1 when an
+	  MLDv1 querier is present. See RFC 3810 for details.
+
+config NET_IPV6_MLD_V1_COMPAT
+	bool "MLDv1 compatibility mode"
+	depends on NET_IPV6_MLD
+	default y
+	help
+	  Operate as an MLDv1 listener while an MLDv1 querier is present on
+	  the link, as RFC 3810 ch 8.2.1 requires. When disabled, MLDv1
+	  Queries and Reports are ignored (RFC 3810 ch 10.1), so that a forged
+	  MLDv1 Query cannot switch the node to MLDv1. Only disable this on
+	  links without MLDv1 routers.
+
+config NET_IPV6_MLD_ROBUSTNESS
+	int "MLD Robustness Variable"
+	depends on NET_IPV6_MLD
+	range 1 7
+	default 2
+	help
+	  The Robustness Variable of RFC 3810 ch 9.1 allows tuning for the
+	  expected packet loss on a link, it should not be set to one. The
+	  unsolicited report of a join is sent Robustness Variable times in
+	  total, and an MLDv1 querier is remembered for Robustness Variable
+	  times the Query Interval plus one Query Response Interval after its
+	  last query.
 
 config NET_IPV6_NBR_CACHE
 	bool "Neighbor cache"
