@@ -36,6 +36,16 @@ struct rtio_sqe *i2c_rtio_copy(struct rtio *r, struct rtio_iodev *iodev, const s
 		if (msgs[i].flags & I2C_MSG_READ) {
 			rtio_sqe_prep_read(sqe, iodev, RTIO_PRIO_NORM, msgs[i].buf, msgs[i].len,
 					   NULL);
+		} else if (msgs[i].len == 0) {
+			/* Address-only probes have no payload. The generic RTIO write
+			 * helper requires a nonempty buffer, but I2C controllers support
+			 * this zero-length TX operation for bus scanning.
+			 */
+			*sqe = (struct rtio_sqe){
+				.op = RTIO_OP_TX,
+				.prio = RTIO_PRIO_NORM,
+				.iodev = iodev,
+			};
 		} else {
 			rtio_sqe_prep_write(sqe, iodev, RTIO_PRIO_NORM, msgs[i].buf, msgs[i].len,
 					    NULL);

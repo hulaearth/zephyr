@@ -519,6 +519,7 @@ void i2c_stm32_event(const struct device *dev)
 
 	/* NACK received */
 	if (LL_I2C_IsActiveFlag_NACK(i2c)) {
+		data->is_nack = true;
 		LL_I2C_ClearFlag_NACK(i2c);
 		/*
 		 * AutoEndMode is always disabled in controller mode,
@@ -534,7 +535,8 @@ void i2c_stm32_event(const struct device *dev)
 		LL_I2C_DisableReloadMode(i2c);
 		i2c_stm32_controller_mode_end(dev);
 
-		i2c_stm32_rtio_complete(dev, ret);
+		/* NACK and STOP may be delivered in separate interrupts. */
+		i2c_stm32_rtio_complete(dev, data->is_nack ? -EIO : ret);
 		return;
 	}
 
@@ -643,6 +645,7 @@ int i2c_stm32_msg_start(const struct device *dev, uint8_t flags, uint8_t *buf, s
 						    (flags & I2C_MSG_RW_MASK) == I2C_MSG_WRITE);
 #endif /* CONFIG_I2C_STM32_V2_DMA */
 
+	data->is_nack = false;
 	data->xfer_buf = buf;
 	data->xfer_len = buf_len;
 	data->xfer_flags = flags;
