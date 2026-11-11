@@ -22,6 +22,17 @@
 
 #include <zephyr/drivers/sensor.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+/** Read serial freshly after a successful retained-idle sample; caller serializes access.
+ * Returns -ENOTSUP for other modes and -EAGAIN before a valid sample.
+ */
+int scd4x_get_serial(const struct device *dev, uint64_t *serial);
+#ifdef __cplusplus
+}
+#endif
+
 /**
  * @brief Custom sensor attributes for SCD4X
  */

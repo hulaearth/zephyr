@@ -67,6 +67,21 @@ static int sht4x_read_sample(const struct device *dev,
 	return 0;
 }
 
+int sht4x_get_serial(const struct device *dev, uint32_t *serial)
+{
+	uint16_t high, low;
+	int ret = sht4x_write_command(dev, SHT4X_CMD_READ_SERIAL);
+
+	if (ret == 0) {
+		k_msleep(1);
+		ret = sht4x_read_sample(dev, &high, &low);
+	}
+	if (ret == 0) {
+		*serial = ((uint32_t)high << 16) | low;
+	}
+	return ret;
+}
+
 /* public API for handling the heater */
 int sht4x_fetch_with_heater(const struct device *dev)
 {

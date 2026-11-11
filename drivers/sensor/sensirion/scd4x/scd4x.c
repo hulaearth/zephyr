@@ -95,6 +95,30 @@ static int scd4x_write_reg(const struct device *dev, uint8_t cmd, uint16_t *data
 	return 0;
 }
 
+int scd4x_get_serial(const struct device *dev, uint64_t *serial)
+{
+	const struct scd4x_config *cfg = dev->config;
+	const struct scd4x_data *data = dev->data;
+	uint8_t bytes[9];
+	int ret;
+
+	if (cfg->mode != SCD4X_MODE_SINGLE_SHOT_RETAINED_IDLE) {
+		return -ENOTSUP;
+	}
+	if (!data->retained_idle_sample_valid) {
+		return -EAGAIN;
+	}
+	ret = scd4x_write_command(dev, SCD4X_CMD_GET_SERIAL_NUMBER);
+	if (ret == 0) {
+		ret = scd4x_read_reg(dev, bytes, sizeof(bytes));
+	}
+	if (ret == 0) {
+		*serial = ((uint64_t)sys_get_be16(bytes) << 32) |
+			  ((uint64_t)sys_get_be16(bytes + 3) << 16) | sys_get_be16(bytes + 6);
+	}
+	return ret;
+}
+
 static int scd4x_data_ready(const struct device *dev, bool *is_data_ready)
 {
 	uint8_t rx_data[3];

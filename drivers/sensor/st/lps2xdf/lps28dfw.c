@@ -9,8 +9,21 @@
 #include "lps2xdf.h"
 #include "lps28dfw.h"
 #include <zephyr/logging/log.h>
+#include <zephyr/drivers/sensor/lps28dfw.h>
 
 LOG_MODULE_DECLARE(LPS2XDF, CONFIG_SENSOR_LOG_LEVEL);
+
+int lps28dfw_get_who_am_i(const struct device *dev, uint8_t *id)
+{
+	const struct lps2xdf_config *cfg = dev->config;
+	lps28dfw_id_t value;
+
+	if (lps28dfw_id_get((stmdev_ctx_t *)&cfg->ctx, &value) < 0) {
+		return -EIO;
+	}
+	*id = value.whoami;
+	return 0;
+}
 
 static inline int lps28dfw_mode_set_odr_raw(const struct device *dev, uint8_t odr)
 {

@@ -35,6 +35,7 @@
 #define SCD4X_CMD_GET_SELF_CALIB_INITIAL_PERIOD  23
 #define SCD4X_CMD_SET_SELF_CALIB_STANDARD_PERIOD 24
 #define SCD4X_CMD_GET_SELF_CALIB_STANDARD_PERIOD 25
+#define SCD4X_CMD_GET_SERIAL_NUMBER              26
 
 #define SCD4X_CRC_POLY 0x31
 #define SCD4X_CRC_INIT 0xFF
@@ -85,7 +86,7 @@ const struct cmds_t scd4x_cmds[] = {
 	{0x2427, 1},    {0x2322, 1},  {0xE000, 1},   {0xE000, 1},   {0x362F, 400},   {0x2416, 1},
 	{0x2313, 1},    {0x21AC, 0},  {0xE4B8, 1},   {0x3615, 800}, {0x3639, 10000}, {0x3632, 1200},
 	{0x219D, 5000}, {0x2196, 50}, {0x36E0, 1},   {0x36F6, 30},  {0x2445, 1},     {0x2340, 1},
-	{0x244E, 1},    {0x234B, 1},
+	{0x244E, 1},    {0x234B, 1},  {0x3682, 1},
 };
 
 #endif /* ZEPHYR_DRIVERS_SENSOR_SCD4X_SCD4X_H_ */

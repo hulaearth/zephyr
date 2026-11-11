@@ -60,6 +60,9 @@ enum sensor_attribute_sht4x {
  */
 int sht4x_fetch_with_heater(const struct device *dev);
 
+/** Read the serial number freshly. Caller serializes access to this device. */
+int sht4x_get_serial(const struct device *dev, uint32_t *serial);
+
 #ifdef __cplusplus
 }
 #endif

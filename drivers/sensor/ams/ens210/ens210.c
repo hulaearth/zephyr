@@ -13,6 +13,7 @@
 #include <zephyr/sys/byteorder.h>
 #include <zephyr/sys/util.h>
 #include <zephyr/drivers/sensor.h>
+#include <zephyr/drivers/sensor/ens210.h>
 #include <zephyr/sys/__assert.h>
 
 #include "ens210.h"
@@ -68,6 +69,18 @@ void ens210_convert(const struct ens210_value_data *temp,
 
 	reading->temperature = (((int64_t)temp_val * 1000000) / 64) - 273150000;
 	reading->humidity    = (((uint64_t)hum_val * 1000000) / 512);
+}
+
+int ens210_get_part_id(const struct device *dev, uint16_t *id)
+{
+	const struct ens210_config *config = dev->config;
+	uint8_t bytes[2];
+	int ret = i2c_burst_read_dt(&config->i2c, ENS210_REG_PART_ID, bytes, sizeof(bytes));
+
+	if (ret == 0) {
+		*id = sys_get_le16(bytes);
+	}
+	return ret;
 }
 
 #if defined(CONFIG_ENS210_TEMPERATURE_SINGLE) \

@@ -9,6 +9,7 @@
  */
 
 #include <zephyr/drivers/sensor.h>
+#include <zephyr/drivers/sensor/lsm6dso.h>
 #include <zephyr/kernel.h>
 #include <zephyr/device.h>
 #include <zephyr/init.h>
@@ -30,6 +31,18 @@ static const uint8_t lsm6dso_lp_filter_map[] = {0,
 						LSM6DSO_LP_ODR_DIV_200,
 						LSM6DSO_LP_ODR_DIV_400,
 						LSM6DSO_LP_ODR_DIV_800};
+
+int lsm6dso_get_who_am_i(const struct device *dev, uint8_t *id)
+{
+	const struct lsm6dso_config *cfg = dev->config;
+	uint8_t value;
+
+	if (lsm6dso_device_id_get((stmdev_ctx_t *)&cfg->ctx, &value) < 0) {
+		return -EIO;
+	}
+	*id = value;
+	return 0;
+}
 
 static int lsm6dso_freq_to_odr_val(uint16_t freq)
 {
