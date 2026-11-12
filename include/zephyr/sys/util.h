@@ -73,18 +73,6 @@ extern "C" {
 /** Number of bits in a long long int. */
 #define BITS_PER_LONG_LONG (__CHAR_BIT__ * __SIZEOF_LONG_LONG__)
 
-/**
- * @brief Create a contiguous bitmask starting at bit position @p l
- *        and ending at position @p h.
- */
-#define GENMASK(h, l) (((~0UL) - (1UL << (l)) + 1) & (~0UL >> (BITS_PER_LONG - 1 - (h))))
-
-/**
- * @brief Create a contiguous 64-bit bitmask starting at bit position @p l
- *        and ending at position @p h.
- */
-#define GENMASK64(h, l) (((~0ULL) - (1ULL << (l)) + 1) & (~0ULL >> (BITS_PER_LONG_LONG - 1 - (h))))
-
 /** @brief 0 if @p cond is true-ish; causes a compile error otherwise. */
 #define ZERO_OR_COMPILE_ERROR(cond) ((int)sizeof(char[1 - (2 * !(cond))]) - 1)
 
@@ -1104,11 +1092,15 @@ static ALWAYS_INLINE uint64_t sys_lcm_s(int32_t a, int32_t b)
 		uint32_t _wf_cycle_count = k_us_to_cyc_ceil32(timeout);                            \
 		uint32_t _wf_start = k_cycle_get_32();                                             \
 		bool _wf_ret;                                                                      \
-		while (!(_wf_ret = (expr)) &&                                                      \
-		       (_wf_cycle_count > (k_cycle_get_32() - _wf_start))) {                       \
+		do {                                                                               \
+			bool _wf_timed_out = (_wf_cycle_count <= (k_cycle_get_32() - _wf_start));  \
+			_wf_ret = (expr);                                                          \
+			if (_wf_ret || _wf_timed_out) {                                            \
+				break;                                                             \
+			}                                                                          \
 			({ delay_stmt; });                                                         \
 			Z_SPIN_DELAY(10);                                                          \
-		}                                                                                  \
+		} while (true);                                                                    \
 		(_wf_ret);                                                                         \
 	})
 

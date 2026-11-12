@@ -18,6 +18,7 @@ tests:
       - apollo3p_evb
       - apollo510_evb
       - nrf7120dk/nrf7120/cpuapp
+      - nrf7120dk/nrf7120e/cpuapp
       - frdm_mcxe247@w25q64
       - frdm_mcxe31b@w25q64
       - stm32h573i_dk
@@ -25,6 +26,8 @@ tests:
       - stm32h7b3i_dk
       - stm32l562e_dk
       - stm32h735g_disco
+      - stm32h7s78_dk
+      - nucleo_h7s3l8
     integration_platforms:
       - native_sim
       - apollo3p_evb
@@ -46,6 +49,8 @@ tests:
       - stm32h5f5j_dk
       - stm32h7b3i_dk
       - stm32l562e_dk
+      - stm32h7s78_dk
+      - nucleo_h7s3l8
     integration_platforms:
       - stm32h573i_dk
       - stm32h7b3i_dk

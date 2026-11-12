@@ -7,8 +7,7 @@
 /dts-v1/;
 
 /*
- * Non-secure address view: it is what MIMXRT266x_COMMON.h yields for a build
- * without -mcmse, so devicetree and the SDK headers agree. Switch to
+ * Non-secure address view (MIMXRT266x without -mcmse). Switch to
  * nxp_rt2663.dtsi once this port builds as secure firmware.
  */
 #include <nxp/imxrt/imxrt266x/nxp_rt2663_cm85_ns.dtsi>
@@ -19,6 +18,10 @@
 / {
 	compatible = "nxp,mimxrt2663";
 	model = "NXP MIMXRT2660-EVK board";
+
+	aliases {
+		rtc = &rtc0;
+	};
 
 	chosen {
 		/*
@@ -41,6 +44,17 @@
 		zephyr,console = &lpuart0;
 		zephyr,shell-uart = &lpuart0;
 	};
+
+	/* This node describes the GPIO pins of the 8080 interface. */
+	nxp_lcd_8080_connector: lcd-8080-connector {
+		compatible = "nxp,lcd-8080";
+		#gpio-cells = <2>;
+		gpio-map-mask = <0xffffffff 0xffffffc0>;
+		gpio-map-pass-thru = <0 0x3f>;
+		gpio-map = <9 0 &gpio1 22 0>,	/* Pin 9, LCD touch INT */
+			   <10 0 &gpio1 21 0>,	/* Pin 10, LCD backlight control */
+			   <11 0 &gpio1 23 0>;	/* Pin 11, LCD and touch reset */
+	};
 };
 
 /*
@@ -62,11 +76,31 @@
 	status = "okay";
 };
 
+&lpi2c0 {
+	status = "okay";
+};
+
+&media_ccm {
+	status = "okay";
+};
+
 &gpio0 {
 	status = "okay";
 };
 
+&gpio1 {
+	status = "okay";
+};
+
 &gpio6 {
+	status = "okay";
+};
+
+&gpio5 {
+	status = "okay";
+};
+
+&rtc0 {
 	status = "okay";
 };
 
@@ -109,3 +143,35 @@
 &psram {
 	status = "okay";
 };
+
+zephyr_mipi_dsi: &mipi_dsi {};
+
+&edma0 {
+	status = "okay";
+};
+
+&edma1 {
+	status = "okay";
+};
+
+&lpi2c1 {
+	pinctrl-0 = <&pinmux_lpi2c1>;
+	pinctrl-names = "default";
+	status = "okay";
+
+	/* U28, NXP P3T1755DP temperature sensor at 0x48 (A0/A1/A2 strapped low). */
+	p3t1755: p3t1755@48 {
+		compatible = "nxp,p3t1755";
+		reg = <0x48>;
+	};
+};
+
+&lpspi0 {
+	pinctrl-0 = <&pinmux_lpspi0>;
+	pinctrl-names = "default";
+	status = "okay";
+};
+
+zephyr_mipi_dbi_parallel: &dcif {};
+
+nxp_8080_touch_panel_i2c: &lpi2c1 {};

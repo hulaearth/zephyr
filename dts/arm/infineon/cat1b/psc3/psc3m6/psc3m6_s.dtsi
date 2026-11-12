@@ -6,14 +6,71 @@
  */
 
 #include <mem.h>
+#include <zephyr/dt-bindings/i2c/i2c.h>
+#include <zephyr/dt-bindings/mfd/infineon-hppass.h>
 #include "psc3m6.cm33.dtsi"
 
 / {
 	soc {
+		dma0: dw@52180000 {
+			compatible = "infineon,dma";
+			reg = <0x52180000 0x10000>;
+			#dma-cells = <1>;
+			dma-channels = <16>;
+			interrupts = <46 4>, /* CH0 */
+				     <47 4>, /* CH1 */
+				     <48 4>, /* CH2 */
+				     <49 4>, /* CH3 */
+				     <50 4>, /* CH4 */
+				     <51 4>, /* CH5 */
+				     <52 4>, /* CH6 */
+				     <53 4>, /* CH7 */
+				     <54 4>, /* CH8 */
+				     <55 4>, /* CH9 */
+				     <56 4>, /* CH10 */
+				     <57 4>, /* CH11 */
+				     <58 4>, /* CH12 */
+				     <59 4>, /* CH13 */
+				     <60 4>, /* CH14 */
+				     <61 4>; /* CH15 */
+			status = "disabled";
+		};
+
+		dma1: dw@52190000 {
+			compatible = "infineon,dma";
+			reg = <0x52190000 0x10000>;
+			#dma-cells = <1>;
+			dma-channels = <16>;
+			interrupts = <62 4>, /* CH0 */
+				     <63 4>, /* CH1 */
+				     <64 4>, /* CH2 */
+				     <65 4>, /* CH3 */
+				     <66 4>, /* CH4 */
+				     <67 4>, /* CH5 */
+				     <68 4>, /* CH6 */
+				     <69 4>, /* CH7 */
+				     <70 4>, /* CH8 */
+				     <71 4>, /* CH9 */
+				     <72 4>, /* CH10 */
+				     <73 4>, /* CH11 */
+				     <74 4>, /* CH12 */
+				     <75 4>, /* CH13 */
+				     <76 4>, /* CH14 */
+				     <77 4>; /* CH15 */
+			status = "disabled";
+		};
+
 		watchdog0: watchdog@5220c000 {
 			compatible = "infineon,watchdog";
 			reg = <0x5220c000 0x10>;
 			interrupts = <36 4>;
+			status = "disabled";
+		};
+
+		mcwdt0: mcwdt@5220d000 {
+			compatible = "infineon,lp-timer";
+			reg = <0x5220d000 0x40>;
+			interrupts = <32 4>;
 			status = "disabled";
 		};
 
@@ -23,6 +80,21 @@
 			interrupts = <33 4>;
 			alarms-count = <2>;
 			status = "disabled";
+		};
+
+		cryptolite0: crypto@52230000 {
+			compatible = "infineon,mxcryptolite";
+			reg = <0x52230000 0x10000>;
+
+			mxcryptolite_trng: mxcryptolite_trng {
+				compatible = "infineon,mxcryptolite-trng";
+				status = "disabled";
+			};
+
+			mxcryptolite_crypto: mxcryptolite_crypto {
+				compatible = "infineon,mxcryptolite-crypto";
+				status = "disabled";
+			};
 		};
 
 		pinctrl: pinctrl@52400000 {
@@ -170,6 +242,25 @@
 			status = "disabled";
 		};
 
+		lpcomp0: comparator@52430000 {
+			compatible = "infineon,lp-comp";
+			reg = <0x52430000 0x10000>;
+			interrupts = <37 4>;
+			status = "disabled";
+
+			lpcomp0_0: lpcomp0-0 {
+				compatible = "infineon,lp-comp-channel";
+				channel = <0>;
+				status = "disabled";
+			};
+
+			lpcomp0_1: lpcomp0-1 {
+				compatible = "infineon,lp-comp-channel";
+				channel = <1>;
+				status = "disabled";
+			};
+		};
+
 		canfd0: canfd@52800000 {
 			compatible = "infineon,canfd-controller";
 			reg = <0x52800000 0x1088>, <0x52810000 0x1000>;
@@ -209,6 +300,7 @@
 			reg = <0x52820000 0xfe0>;
 			interrupts = <31 4>;
 			clk-dst = <0x400>;
+			zephyr,disabling-power-states = <&deepsleep &deepsleep_ram>;
 			status = "disabled";
 		};
 
@@ -217,6 +309,7 @@
 			reg = <0x52840000 0xfe0>;
 			interrupts = <39 4>;
 			clk-dst = <0x402>;
+			zephyr,disabling-power-states = <&deepsleep &deepsleep_ram>;
 			status = "disabled";
 		};
 
@@ -225,6 +318,7 @@
 			reg = <0x52850000 0xfe0>;
 			interrupts = <40 4>;
 			clk-dst = <0x404>;
+			zephyr,disabling-power-states = <&deepsleep &deepsleep_ram>;
 			status = "disabled";
 		};
 
@@ -233,6 +327,7 @@
 			reg = <0x52860000 0xfe0>;
 			interrupts = <41 4>;
 			clk-dst = <0x406>;
+			zephyr,disabling-power-states = <&deepsleep &deepsleep_ram>;
 			status = "disabled";
 		};
 
@@ -241,7 +336,45 @@
 			reg = <0x52870000 0xfe0>;
 			interrupts = <42 4>;
 			clk-dst = <0x408>;
+			zephyr,disabling-power-states = <&deepsleep &deepsleep_ram>;
 			status = "disabled";
+		};
+
+		hppass_analog0: analog@52b00000 {
+			compatible = "infineon,hppass-analog-v3", "infineon,hppass-analog";
+			reg = <0x52b00000 0x100000>;
+			ranges = <0x0 0x52b00000 0x100000>;
+			interrupts = <124 4>;
+			#address-cells = <1>;
+			#size-cells = <1>;
+
+			/*
+			 * Vendor-recommended startup timing.
+			 * Only usage of the startup parameters recommended
+			 * by the vendor guarantees reliable operation.
+			 * Use the Device Configurator tool or refer to the
+			 * Technical Reference Manual for correct values.
+			 * Override in board overlay only if directed by TRM.
+			 */
+			startup-clk-div = <24>;
+			startup-0-count = <200>;
+			startup-0-sar = <1>;
+			startup-1-count = <50>;
+
+			/* The SAR driver starts conversions through this trigger. */
+			trig-in-0-type = <IFX_HPPASS_TR_FW_PULSE>;
+			status = "disabled";
+
+			adc0: adc@80000 {
+				compatible = "infineon,hppass-sar-adc-v3",
+					     "infineon,hppass-sar-adc";
+				reg = <0x00080000 0x10000>;
+				interrupts = <125 4>;
+				#address-cells = <1>;
+				#size-cells = <0>;
+				#io-channel-cells = <1>;
+				status = "disabled";
+			};
 		};
 
 		scb5: scb@52c00000 {
@@ -249,6 +382,7 @@
 			reg = <0x52c00000 0xfe0>;
 			interrupts = <43 4>;
 			clk-dst = <0x600>;
+			zephyr,disabling-power-states = <&deepsleep &deepsleep_ram>;
 			status = "disabled";
 		};
 	};
@@ -256,5 +390,17 @@
 	sram0: memory@34000000 {
 		compatible = "mmio-sram";
 		reg = <0x34000000 0x20000>;
+	};
+
+	flash_controller: flash-controller@52150000 {
+		compatible = "infineon,flash-controller";
+		reg = <0x52150000 0x10000>;
+		ranges;
+		#address-cells = <1>;
+		#size-cells = <1>;
+		erase-value = <0x00>;
+		infineon,cache-invalidate = "icache0";
+		infineon,explicit-erase;
+		status = "disabled";
 	};
 };

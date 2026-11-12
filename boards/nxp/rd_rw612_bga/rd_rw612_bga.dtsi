@@ -138,6 +138,10 @@ arduino_i2c: &flexcomm2 {
 	status = "okay";
 };
 
+&ocotp {
+	status = "okay";
+};
+
 &hsgpio0 {
 	status = "okay";
 };
@@ -313,6 +317,10 @@ nxp_8080_touch_panel_i2c: &arduino_i2c {
 &sctimer {
 	pinctrl-0 = <&pinmux_pwm0>;
 	pinctrl-names = "default";
+	status = "okay";
+};
+
+&rtc {
 	status = "okay";
 };
 
