@@ -27,6 +27,13 @@ config CPU_FREQ_INTERVAL_MS
 	  Controls the interval (in milliseconds) at which the CPU Frequency
 	  subsystem runs and evaluates the current policy.
 
+config CPU_FREQ_MANUAL_SAMPLING
+	bool "Application-controlled CPU frequency policy sampling"
+	depends on !SMP
+	help
+	  Disable the subsystem's periodic timer. The application must call
+	  cpu_freq_sample() at its chosen sampling interval.
+
 config CPU_FREQ_PER_CPU_SCALING
 	bool "Per-CPU frequency scaling"
 	default n
