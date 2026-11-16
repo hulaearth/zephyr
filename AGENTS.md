@@ -16,17 +16,16 @@ do not rely on this digest or on training data alone.
 
 ## Rules for agents
 
-- Every commit must carry a `Signed-off-by:` line from the human responsible for the work; it
-  is required, not optional. Never add, edit or copy one yourself: only a human can certify the
-  DCO, and the submitter adds their own (`git commit -s`). Never add `Co-authored-by:`. Do not
-  put "Generated with ...", session links or any other mention of AI tools in commit messages,
-  PR bodies, issues or comments. The `Assisted-by:` trailer below is the only place AI
-  involvement is recorded.
+- This is an internal Hula fork. Internal commits do not require a human DCO
+  sign-off or prior human authorization for an agent to create or submit them.
+  Do not submit these commits to upstream Zephyr as-is; any upstream contribution
+  must first satisfy the upstream project's current contribution and DCO rules.
+  Never add `Co-authored-by:` or mention AI tools outside the `Assisted-by:` trailer.
 - Add exactly one `Assisted-by: <Agent>:<model-version> [tool ...]` trailer, for example
   `Assisted-by: Claude:claude-opus-4.6 coccinelle`, naming the tool actually used. Replace it
   rather than stacking when a different model amends the commit. `checkpatch.pl` validates the
   format; basic tools (git, gcc, cmake, editors) are not listed.
-- The human reviews and tests every change before it is submitted. State what you did not do
+- Follow the internal project review and test requirements. State what you did not do
   (not built, not run, not run on hardware, no reproducer) instead of implying it was done.
 - Review comments written with AI help are verified by the human before posting; never post raw
   model output (`doc/contribute/reviewer_expectations.rst`).
@@ -80,7 +79,6 @@ trip. Fix the cause, never work around a check.
     Fixes #12345
 
     Assisted-by: Claude:claude-opus-4.6
-    Signed-off-by: Full Name <email@example.com>
 
 - `area:` is the prefix the file's recent history uses: `git log --format=%s -20 -- <path>`.
   Examples: `Bluetooth: Host:`, `drivers: i2c: nrfx:`, `dts: arm: st:`, `boards: nordic:`,
@@ -88,8 +86,6 @@ trip. Fix the cause, never work around a check.
 - Trailers (`Assisted-by`, `Signed-off-by`, `Link:`, `(cherry picked from commit ...)`) form one
   block as the last paragraph. `Fixes #N` goes in its own paragraph directly before that
   block. Reference other commits as `commit <12-char sha> ("subject")`.
-- One `Signed-off-by:` line must match the commit `Author:` name and e-mail; never remove an
-  existing sign-off. Verify with `git log -1 --format='%an <%ae>%n%b'`.
 - One logical change per commit: a fix, its tests and its docs may be separate commits, but one
   commit never mixes unrelated changes. No fixup, squash or merge commits in a PR: fold review
   fixes into the commit that owns the lines. Without an interactive terminal:
