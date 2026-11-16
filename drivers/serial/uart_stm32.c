@@ -2626,6 +2626,9 @@ static int uart_stm32_pm_action(const struct device *dev, enum pm_device_action 
 		err = clock_control_on(config->clock, (clock_control_subsys_t)&config->pclken[0]);
 		if (err < 0) {
 			LOG_ERR("Could not enable (LP)UART clock");
+#if defined(CONFIG_SOC_SERIES_STM32U0X)
+			(void)pinctrl_apply_state(config->pcfg, PINCTRL_STATE_SLEEP);
+#endif
 			return err;
 		}
 
