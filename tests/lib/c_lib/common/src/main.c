@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2017 Intel Corporation
+ * Copyright (c) 2026 Atmosic
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -45,6 +46,9 @@
 #endif
 #ifdef CONFIG_COMMON_LIBC_MALLOC
 #include <sys_malloc.h>
+#endif
+#if defined(CONFIG_COMMON_LIBC_MALLOC) && (CONFIG_COMMON_LIBC_MALLOC_ARENA_SIZE != 0)
+#include <zephyr/sys/libc-hooks.h>
 #endif
 
 #define STACK_SIZE (512 + CONFIG_TEST_EXTRA_STACK_SIZE)
@@ -355,6 +359,16 @@ ZTEST(libc_common, test_memcmp)
 
 	ret = memcmp(m1, m2, sizeof(m2));
 	zassert_true((ret != 0), "memcmp 2 block of memory failed");
+}
+
+ZTEST(libc_common, test_memcmp_unsigned_bytes)
+{
+	int (*volatile compare)(const void *, const void *, size_t) = memcmp;
+	const unsigned char low[] = {0x00};
+	const unsigned char high[] = {0x80};
+
+	zassert_true(compare(high, low, sizeof(high)) > 0);
+	zassert_true(compare(low, high, sizeof(low)) < 0);
 }
 
 /**
@@ -1356,6 +1370,15 @@ ZTEST(libc_common, test_malloc)
 #else
 	ztest_test_skip();
 #endif /* CONFIG_COMMON_LIBC_MALLOC && CONFIG_COMMON_LIBC_MALLOC_ARENA_SIZE > 220 */
+}
+
+ZTEST(libc_common, test_malloc_heap_end)
+{
+#if defined(CONFIG_COMMON_LIBC_MALLOC) && (CONFIG_COMMON_LIBC_MALLOC_ARENA_SIZE != 0)
+	zassert_not_equal(z_libc_heap_end(), 0U, "z_libc_heap_end returned an uninitialized value");
+#else
+	ztest_test_skip();
+#endif
 }
 /**
  * @}

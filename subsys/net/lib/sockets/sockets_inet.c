@@ -1911,6 +1911,17 @@ static int zsock_poll_update_ctx(struct net_context *ctx,
 	return 0;
 }
 
+static int sock_poll_prepare_vmeth(void *obj, struct zvfs_pollfd *pfd, struct k_poll_event **pev,
+				   struct k_poll_event *pev_end)
+{
+	return zsock_poll_prepare_ctx(obj, pfd, pev, pev_end);
+}
+
+static int sock_poll_update_vmeth(void *obj, struct zvfs_pollfd *pfd, struct k_poll_event **pev)
+{
+	return zsock_poll_update_ctx(obj, pfd, pev);
+}
+
 static enum tcp_conn_option get_tcp_option(int optname)
 {
 	switch (optname) {
@@ -3404,6 +3415,7 @@ int zsock_getpeername_ctx(struct net_context *ctx, struct net_sockaddr *addr,
 		addr6.sin6_port = net_sin6(&ctx->remote)->sin6_port;
 		memcpy(&addr6.sin6_addr, &net_sin6(&ctx->remote)->sin6_addr,
 		       sizeof(struct net_in6_addr));
+		addr6.sin6_scope_id = net_sin6(&ctx->remote)->sin6_scope_id;
 		newlen = sizeof(struct net_sockaddr_in6);
 
 		memcpy(addr, &addr6, MIN(*addrlen, newlen));
@@ -3511,28 +3523,6 @@ static int sock_ioctl_vmeth(void *obj, unsigned int request, va_list args)
 		}
 
 		return 0;
-	}
-
-	case ZFD_IOCTL_POLL_PREPARE: {
-		struct zsock_pollfd *pfd;
-		struct k_poll_event **pev;
-		struct k_poll_event *pev_end;
-
-		pfd = va_arg(args, struct zsock_pollfd *);
-		pev = va_arg(args, struct k_poll_event **);
-		pev_end = va_arg(args, struct k_poll_event *);
-
-		return zsock_poll_prepare_ctx(obj, pfd, pev, pev_end);
-	}
-
-	case ZFD_IOCTL_POLL_UPDATE: {
-		struct zsock_pollfd *pfd;
-		struct k_poll_event **pev;
-
-		pfd = va_arg(args, struct zsock_pollfd *);
-		pev = va_arg(args, struct k_poll_event **);
-
-		return zsock_poll_update_ctx(obj, pfd, pev);
 	}
 
 	case ZFD_IOCTL_SET_LOCK: {
@@ -3662,6 +3652,8 @@ const struct socket_op_vtable sock_fd_op_vtable = {
 		.write = sock_write_vmeth,
 		.close2 = sock_close2_vmeth,
 		.ioctl = sock_ioctl_vmeth,
+		.poll_prepare = sock_poll_prepare_vmeth,
+		.poll_update = sock_poll_update_vmeth,
 	},
 	.shutdown = sock_shutdown_vmeth,
 	.bind = sock_bind_vmeth,
