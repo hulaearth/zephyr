@@ -260,6 +260,8 @@ static int set_powermode(const struct device *dev, enum bmm350_power_modes power
 		/* Get average configuration */
 		if (powermode == BMM350_NORMAL_MODE) {
 			delay_us = BMM350_SUSPEND_TO_NORMAL_DELAY;
+		} else if (powermode == BMM350_SUSPEND_MODE) {
+			delay_us = BMM350_GOTO_SUSPEND_DELAY;
 		}
 
 		/* Check if desired power mode is forced mode */
@@ -311,7 +313,10 @@ static int bmm350_set_powermode(const struct device *dev, enum bmm350_power_mode
 		ret = bmm350_reg_write(dev, BMM350_REG_PMU_CMD, BMM350_PMU_CMD_SUS);
 		if (ret != 0) {
 			LOG_ERR("%s: set PMU cmd failed", dev->name);
+			return ret;
 		}
+		/* The PMU must finish entering suspend before its next command. */
+		k_usleep(BMM350_GOTO_SUSPEND_DELAY);
 	}
 
 	ret = set_powermode(dev, powermode);
@@ -394,6 +399,9 @@ int bmm350_magnetic_reset(const struct device *dev)
 		LOG_DBG("set power mode 1:%d", ret);
 	} else {
 		ret = bmm350_reg_write(dev, BMM350_REG_PMU_CMD, 0x00);
+		if (ret == 0) {
+			k_usleep(BMM350_GOTO_SUSPEND_DELAY);
+		}
 	}
 	return ret;
 }
@@ -1232,16 +1240,22 @@ static int pm_action(const struct device *dev, enum pm_device_action action)
 		struct bmm350_pmu_cmd_status_0 status = {0};
 
 		ret = bmm350_set_powermode(dev, BMM350_SUSPEND_MODE);
-		if (ret == 0) {
-			k_usleep(BMM350_GOTO_SUSPEND_DELAY);
-			ret = bmm350_get_pmu_cmd_status_0(dev, &status);
-		}
-		if (ret == 0 && (status.pmu_cmd_busy || status.cmd_is_illegal ||
-				status.pwr_mode_is_normal || status.pmu_cmd_value != BMM350_PMU_CMD_SUS)) {
-			ret = -EIO;
-		}
 		if (ret != 0) {
-			LOG_ERR("failed to verify suspend mode: %d", ret);
+			LOG_ERR("suspend transition failed: %d", ret);
+			break;
+		}
+		k_usleep(BMM350_GOTO_SUSPEND_DELAY);
+		ret = bmm350_get_pmu_cmd_status_0(dev, &status);
+		if (ret != 0) {
+			LOG_ERR("suspend status read failed: %d", ret);
+			break;
+		}
+		if (status.pmu_cmd_busy || status.cmd_is_illegal || status.pwr_mode_is_normal ||
+		    status.pmu_cmd_value != BMM350_PMU_CMD_SUS) {
+			LOG_ERR("suspend status invalid busy=%u illegal=%u normal=%u command=%u",
+				status.pmu_cmd_busy, status.cmd_is_illegal, status.pwr_mode_is_normal,
+				status.pmu_cmd_value);
+			ret = -EIO;
 		} else {
 			LOG_INF("suspend verified busy=%u normal=%u command=%u",
 				status.pmu_cmd_busy, status.pwr_mode_is_normal,
