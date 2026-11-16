@@ -7,7 +7,8 @@ SPDX-License-Identifier: Apache-2.0
 
 This file is for coding agents, and for the humans driving them, working in this repository.
 It is a digest of `doc/contribute/` plus the things CI and maintainers reject most often. Where
-it is silent or disagrees with the documentation, the documentation wins:
+it is silent or disagrees with the documentation, the documentation wins, except
+that the internal fork process rules below govern internal contributions:
 `doc/contribute/guidelines.rst` (process, DCO, AI-assistant policy),
 `doc/contribute/contributor_expectations.rst` (PR shape), `doc/contribute/style/` (C, Kconfig,
 CMake, Doxygen and devicetree style) and `doc/contribute/coding_guidelines/index.rst` (the
