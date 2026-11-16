@@ -2469,6 +2469,27 @@ static int uart_stm32_registers_configure(const struct device *dev)
 
 	LL_USART_Enable(usart);
 
+#if defined(CONFIG_SOC_SERIES_STM32U0X)
+	/* The system timer is not running at PRE_KERNEL_1. Bound MMIO reads instead. */
+	uint32_t checks = 100000U;
+
+	while (!LL_USART_IsActiveFlag_TEACK(usart) && --checks != 0U) {
+	}
+	if (checks == 0U) {
+		LL_USART_Disable(usart);
+		return -ETIMEDOUT;
+	}
+	/* Basic USART3/4 reserve REACK. */
+	if (IS_UART_WAKEUP_FROMSTOP_INSTANCE(usart)) {
+		checks = 100000U;
+		while (!LL_USART_IsActiveFlag_REACK(usart) && --checks != 0U) {
+		}
+		if (checks == 0U) {
+			LL_USART_Disable(usart);
+			return -ETIMEDOUT;
+		}
+	}
+#else
 #ifdef USART_ISR_TEACK
 	/* Wait until TEACK flag is set */
 	while (!(LL_USART_IsActiveFlag_TEACK(usart))) {
@@ -2481,6 +2502,7 @@ static int uart_stm32_registers_configure(const struct device *dev)
 	}
 #endif /* USART_ISR_REACK */
 
+#endif
 	return 0;
 }
 
@@ -2527,6 +2549,11 @@ static int uart_stm32_init(const struct device *dev)
 
 	err = uart_stm32_registers_configure(dev);
 	if (err < 0) {
+#if defined(CONFIG_SOC_SERIES_STM32U0X)
+		(void)clock_control_off(config->clock,
+				(clock_control_subsys_t)&config->pclken[0]);
+		(void)pinctrl_apply_state(config->pcfg, PINCTRL_STATE_SLEEP);
+#endif
 		return err;
 	}
 
@@ -2544,11 +2571,26 @@ static int uart_stm32_init(const struct device *dev)
 }
 
 #ifdef CONFIG_PM_DEVICE
-static void uart_stm32_suspend_setup(const struct device *dev)
+static int uart_stm32_suspend_setup(const struct device *dev)
 {
 	const struct uart_stm32_config *config = dev->config;
 	USART_TypeDef *usart = config->usart;
 
+#if defined(CONFIG_SOC_SERIES_STM32U0X)
+	uint32_t checks = 100000U;
+
+	while (LL_USART_IsActiveFlag_BUSY(usart) && --checks != 0U) {
+	}
+	if (checks == 0U) {
+		return -ETIMEDOUT;
+	}
+	checks = 100000U;
+	while (!LL_USART_IsActiveFlag_TC(usart) && --checks != 0U) {
+	}
+	if (checks == 0U) {
+		return -ETIMEDOUT;
+	}
+#else
 #ifdef USART_ISR_BUSY
 	/* Make sure that no USART transfer is on-going */
 	while (LL_USART_IsActiveFlag_BUSY(usart) == 1) {
@@ -2561,8 +2603,10 @@ static void uart_stm32_suspend_setup(const struct device *dev)
 	while (LL_USART_IsActiveFlag_REACK(usart) == 0) {
 	}
 #endif
+#endif
 	/* Clear OVERRUN flag */
 	LL_USART_ClearFlag_ORE(usart);
+	return 0;
 }
 
 static int uart_stm32_pm_action(const struct device *dev, enum pm_device_action action)
@@ -2604,12 +2648,38 @@ static int uart_stm32_pm_action(const struct device *dev, enum pm_device_action 
 			}
 
 			if (err < 0) {
+#if defined(CONFIG_SOC_SERIES_STM32U0X)
+				/* Leave the suspended pins and clock parked on failure. */
+				(void)clock_control_off(config->clock,
+						(clock_control_subsys_t)&config->pclken[0]);
+				(void)pinctrl_apply_state(config->pcfg, PINCTRL_STATE_SLEEP);
+#endif
 				return err;
 			}
 		}
 		break;
 	case PM_DEVICE_ACTION_SUSPEND:
-		uart_stm32_suspend_setup(dev);
+		err = uart_stm32_suspend_setup(dev);
+		if (err < 0) {
+#if defined(CONFIG_SOC_SERIES_STM32U0X)
+			const struct pinctrl_state *sleep_state;
+#if defined(CONFIG_UART_ASYNC_API)
+			const struct uart_stm32_data *data = dev->data;
+
+			if (data->dma_tx.buffer_length != 0 || data->dma_rx.enabled) {
+				return err;
+			}
+#endif
+			if (err != -ETIMEDOUT || pinctrl_lookup_state(config->pcfg,
+					PINCTRL_STATE_SLEEP, &sleep_state) != 0) {
+				return err;
+			}
+			LOG_WRN("UART drain timed out; disabling peripheral");
+			LL_USART_Disable(config->usart);
+#else
+			return err;
+#endif
+		}
 		/* Stop device clock. Note: fixed clocks are not handled yet. */
 		err = clock_control_off(config->clock, (clock_control_subsys_t)&config->pclken[0]);
 		if (err < 0) {
