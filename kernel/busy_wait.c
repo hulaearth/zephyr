@@ -37,7 +37,34 @@ void z_impl_k_busy_wait(uint32_t usec_to_wait)
 #if defined(CONFIG_ARCH_HAS_CUSTOM_BUSY_WAIT)
 	arch_busy_wait(usec_to_wait);
 #elif defined(CONFIG_SYS_CLOCK_EXISTS)
-#if defined(CONFIG_SYSTEM_CLOCK_HW_CYCLES_PER_SEC_RUNTIME_UPDATE)
+#if defined(CONFIG_SOC_SERIES_STM32N6X) && defined(CONFIG_STM32_LPTIM_TIMER) && \
+	!defined(CONFIG_SYSTEM_CLOCK_HW_CYCLES_PER_SEC_RUNTIME_UPDATE)
+	/* LPTIM reports scaled hardware cycles, but changes only on a prescaled
+	 * counter edge. Include a whole edge so sampling just before it cannot
+	 * make the requested wait shorter than intended.
+	 */
+	BUILD_ASSERT(CONFIG_SYS_CLOCK_HW_CYCLES_PER_SEC == CONFIG_STM32_LPTIM_CLOCK,
+		     "N6 LPTIM busy wait needs its unscaled source frequency");
+	const uint32_t quantum = DT_PROP(DT_CHOSEN(zephyr_system_timer), st_prescaler);
+	const uint64_t target = k_us_to_cyc_ceil64(usec_to_wait) + quantum;
+	uint32_t previous = k_cycle_get_32();
+	uint64_t elapsed = 0U;
+
+	while (elapsed < target) {
+		const uint32_t current = k_cycle_get_32();
+
+		const uint32_t delta = current - previous;
+
+		/* A second unserviced LPTIM reload can make its synthesized cycle
+		 * count step backwards. Never mistake that step for 32-bit wrap.
+		 * A true wrap observed by this polling loop has a small delta.
+		 */
+		if (delta <= INT32_MAX) {
+			elapsed += delta;
+		}
+		previous = current;
+	}
+#elif defined(CONFIG_SYSTEM_CLOCK_HW_CYCLES_PER_SEC_RUNTIME_UPDATE)
 	/*
 	 * When the system timer frequency can change at runtime, the frequency
 	 * used for k_cycle_get_32() conversions may change during the busy wait.

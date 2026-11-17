@@ -49,6 +49,16 @@ extern "C" {
 int cpu_freq_pstate_set(const struct pstate *state);
 
 /**
+ * @brief Sample the configured policy and request its selected P-state.
+ *
+ * Available when CONFIG_CPU_FREQ_MANUAL_SAMPLING is enabled. The caller owns
+ * the sampling interval and must serialize calls. The policy and P-state
+ * driver must support the caller's execution context; timer expiry context
+ * matches the automatic sampling mode.
+ */
+void cpu_freq_sample(void);
+
+/**
  * @}
  */
 

@@ -1,0 +1,20 @@
+/* SPDX-FileCopyrightText: Copyright The Zephyr Project Contributors
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/ {
+	performance-states {
+		pstate_0: pstate_0 {
+			compatible = "zephyr,generic-pstate";
+			load-threshold = <1>;
+			pstate-id = <0>;
+		};
+		pstate_1: pstate_1 {
+			compatible = "zephyr,generic-pstate";
+			load-threshold = <0>;
+			pstate-id = <1>;
+		};
+	};
+};
+
+&pstate_2 { status = "disabled"; };

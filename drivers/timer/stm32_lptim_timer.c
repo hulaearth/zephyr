@@ -80,6 +80,10 @@ static uint32_t lptim_clock_presc = DT_PROP(LPTIM_SYSTIMER_NODE, st_prescaler);
 /* Minimum nb of clock cycles to have to set autoreload register correctly */
 #define LPTIM_GUARD_VALUE 2
 
+#if defined(CONFIG_STM32N6_PM_RETAINED_HSI)
+#define LPTIM_ARROK_POLL_LIMIT 100000U
+#endif
+
 static uint64_t accumulated_lptim_cnt;
 /* Next autoreload value to set */
 static uint32_t autoreload_next;
@@ -233,6 +237,57 @@ static inline bool arrm_state_get(void)
 	return (LL_LPTIM_IsActiveFlag_ARRM(LPTIM) && LL_LPTIM_IsEnabledIT_ARRM(LPTIM));
 }
 
+static inline uint32_t z_clock_lptim_getcounter(void)
+{
+	uint32_t lp_time;
+	uint32_t lp_time_prev_read;
+
+	/* It should be noted that to read reliably the content
+	 * of the LPTIM_CNT register, two successive read accesses
+	 * must be performed and compared
+	 */
+	lp_time = LL_LPTIM_GetCounter(LPTIM);
+	do {
+		lp_time_prev_read = lp_time;
+		lp_time = LL_LPTIM_GetCounter(LPTIM);
+	} while (lp_time != lp_time_prev_read);
+	return lp_time;
+}
+
+static bool lptim_handle_arrok(void)
+{
+	if ((LL_LPTIM_IsActiveFlag_ARROK(LPTIM) != 0)
+		&& LL_LPTIM_IsEnabledIT_ARROK(LPTIM) != 0) {
+		LL_LPTIM_ClearFlag_ARROK(LPTIM);
+		uint32_t autoreload = LL_LPTIM_GetAutoReload(LPTIM);
+
+		if ((autoreload_next > 0) && (autoreload_next != autoreload)) {
+			uint32_t lp_time = z_clock_lptim_getcounter();
+
+			if (LL_LPTIM_IsActiveFlag_ARRM(LPTIM) || autoreload <= lp_time ||
+			    (autoreload - lp_time) < LPTIM_GUARD_VALUE) {
+				/* The old match is pending or too close; let its IRQ account it. */
+				autoreload_ready = true;
+				return true;
+			}
+			if (autoreload_next <= lp_time ||
+			    (autoreload_next - lp_time) < LPTIM_GUARD_VALUE) {
+				/* Keep a stale or near deadline ahead of the live counter. */
+				autoreload_next = lp_time + LPTIM_GUARD_VALUE;
+			}
+
+			/* the new autoreload value change, we set it */
+			autoreload_ready = false;
+			LL_LPTIM_SetAutoReload(LPTIM, autoreload_next);
+		} else {
+			autoreload_ready = true;
+		}
+		return true;
+	}
+
+	return false;
+}
+
 static void lptim_irq_handler(const struct device *unused)
 {
 
@@ -240,17 +295,7 @@ static void lptim_irq_handler(const struct device *unused)
 
 	uint32_t autoreload = LL_LPTIM_GetAutoReload(LPTIM);
 
-	if ((LL_LPTIM_IsActiveFlag_ARROK(LPTIM) != 0)
-		&& LL_LPTIM_IsEnabledIT_ARROK(LPTIM) != 0) {
-		LL_LPTIM_ClearFlag_ARROK(LPTIM);
-		if ((autoreload_next > 0) && (autoreload_next != autoreload)) {
-			/* the new autoreload value change, we set it */
-			autoreload_ready = false;
-			LL_LPTIM_SetAutoReload(LPTIM, autoreload_next);
-		} else {
-			autoreload_ready = true;
-		}
-	}
+	(void)lptim_handle_arrok();
 
 	if (arrm_state_get()) {
 		k_spinlock_key_t key = k_spin_lock(&lock);
@@ -277,6 +322,41 @@ static void lptim_irq_handler(const struct device *unused)
 	}
 }
 
+#if defined(CONFIG_STM32N6_PM_RETAINED_HSI)
+static void lptim_complete_arrok_before_idle(void)
+{
+	uint32_t remaining;
+	bool arrok_handled = false;
+
+	for (remaining = LPTIM_ARROK_POLL_LIMIT; remaining != 0U; --remaining) {
+		arrok_handled |= lptim_handle_arrok();
+		if (autoreload_ready && LL_LPTIM_IsActiveFlag_ARROK(LPTIM) == 0U) {
+			break;
+		}
+	}
+	if (remaining == 0U || !arrok_handled || arrm_state_get()) {
+		return;
+	}
+
+	/* Clear only the NVIC latch for the ARROK flag just acknowledged above. */
+	k_irq_clear_pending(DT_IRQN(LPTIM_SYSTIMER_NODE));
+	if (arrm_state_get()) {
+		k_irq_set_pending(DT_IRQN(LPTIM_SYSTIMER_NODE));
+	}
+}
+
+void sys_clock_idle_enter(uint32_t ticks)
+{
+	sys_clock_set_timeout(ticks, true);
+#ifdef CONFIG_STM32_LPTIM_STDBY_TIMER
+	if (timeout_stdby) {
+		return;
+	}
+#endif
+	lptim_complete_arrok_before_idle();
+}
+#endif /* CONFIG_STM32N6_PM_RETAINED_HSI */
+
 static void lptim_set_autoreload(uint32_t arr)
 {
 	/* Update autoreload register */
@@ -293,23 +373,6 @@ static void lptim_set_autoreload(uint32_t arr)
 		LL_LPTIM_ClearFlag_ARROK(LPTIM);
 		LL_LPTIM_SetAutoReload(LPTIM, arr);
 	}
-}
-
-static inline uint32_t z_clock_lptim_getcounter(void)
-{
-	uint32_t lp_time;
-	uint32_t lp_time_prev_read;
-
-	/* It should be noted that to read reliably the content
-	 * of the LPTIM_CNT register, two successive read accesses
-	 * must be performed and compared
-	 */
-	lp_time = LL_LPTIM_GetCounter(LPTIM);
-	do {
-		lp_time_prev_read = lp_time;
-		lp_time = LL_LPTIM_GetCounter(LPTIM);
-	} while (lp_time != lp_time_prev_read);
-	return lp_time;
 }
 
 void sys_clock_set_timeout(uint32_t ticks, bool idle)
@@ -453,6 +516,13 @@ void sys_clock_set_timeout(uint32_t ticks, bool idle)
 	}
 	/* with slow lptim_clock_freq, LPTIM_GUARD_VALUE of 1 is enough */
 	next_arr = next_arr - 1U;
+
+#if defined(CONFIG_STM32N6_PM_RETAINED_HSI)
+	/* A shorter period leaves no counter value at which the guard above
+	 * permits a later timeout to extend ARR, trapping the timer in short IRQs.
+	 */
+	next_arr = MAX(next_arr, LPTIM_GUARD_VALUE);
+#endif
 
 	/* Update autoreload register */
 	lptim_set_autoreload(next_arr);

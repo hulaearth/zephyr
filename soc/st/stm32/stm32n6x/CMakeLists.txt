@@ -5,6 +5,10 @@ zephyr_sources(
   soc.c
 )
 
+zephyr_sources_ifdef(CONFIG_STM32N6_PM_RETAINED_HSI
+  power.c
+)
+
 zephyr_sources_ifdef(CONFIG_STM32N6_AXISRAM
   axisram/stm32n6_axisram.c
 )

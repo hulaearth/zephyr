@@ -1,0 +1,13 @@
+# SPDX-FileCopyrightText: Copyright The Zephyr Project Contributors
+# SPDX-License-Identifier: Apache-2.0
+
+common:
+  tags: cpu_freq
+  platform_allow: native_sim/native/64
+  integration_platforms: [native_sim/native/64]
+
+tests:
+  subsys.cpu_freq.sampling.automatic: {}
+  subsys.cpu_freq.sampling.manual:
+    extra_configs:
+      - CONFIG_CPU_FREQ_MANUAL_SAMPLING=y
