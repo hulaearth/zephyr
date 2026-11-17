@@ -121,9 +121,14 @@ static void *setup(void)
 	/* Let the shell backend initialize. */
 	k_usleep(10);
 
-	/* get the shell startup newline */
-	uart_emul_get_tx_data(fixture.dev, tx_content, SAMPLE_DATA_SIZE);
-	zassert_mem_equal(tx_content, "\r\n", strlen("\r\n"));
+	/* The managed variant starts the same active shell without startup bytes. */
+	const uint32_t startup_bytes =
+		uart_emul_get_tx_data(fixture.dev, tx_content, SAMPLE_DATA_SIZE);
+	if (IS_ENABLED(CONFIG_SHELL_STARTUP_OUTPUT)) {
+		zassert_mem_equal(tx_content, "\r\n", strlen("\r\n"));
+	} else {
+		zassert_equal(0U, startup_bytes);
+	}
 
 	return &fixture;
 }

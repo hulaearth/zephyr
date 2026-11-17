@@ -361,6 +361,14 @@ config SHELL_AUTOSTART
 	  Disable this option and call shell_start() from the application,
 	  e.g. from a SYS_INIT() hook, to control when the shell starts.
 
+config SHELL_STARTUP_OUTPUT
+	bool "Print shell startup newline and prompt"
+	default y
+	help
+	  Print the initial newline and prompt when the shell becomes active.
+	  Disable this option when shell activity must remain silent until the
+	  first command or log message is written.
+
 config SHELL_CMDS_RETURN_VALUE
 	bool "Retval command"
 	depends on SHELL_CMDS

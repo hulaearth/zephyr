@@ -1948,7 +1948,8 @@ int shell_start(const struct shell *sh)
 		return -EBUSY;
 	}
 
-	if (IS_ENABLED(CONFIG_SHELL_VT100_COLORS)) {
+	if (IS_ENABLED(CONFIG_SHELL_STARTUP_OUTPUT) &&
+	    IS_ENABLED(CONFIG_SHELL_VT100_COLORS)) {
 		z_shell_vt100_color_set(sh, SHELL_NORMAL);
 	}
 
@@ -1960,14 +1961,15 @@ int shell_start(const struct shell *sh)
 	 */
 	z_shell_backend_rx_buffer_flush(sh);
 
-	/* print new line before printing the prompt to clear the line
-	 * vt100 are not used here for compatibility reasons
-	 */
-	z_cursor_next_line_move(sh);
+	if (IS_ENABLED(CONFIG_SHELL_STARTUP_OUTPUT)) {
+		/* Print a new line before the prompt to clear the line. */
+		z_cursor_next_line_move(sh);
+	}
 	state_set(sh, SHELL_STATE_ACTIVE);
 
-	/* Print prompt. */
-	cond_print_prompt(sh);
+	if (IS_ENABLED(CONFIG_SHELL_STARTUP_OUTPUT)) {
+		cond_print_prompt(sh);
+	}
 
 	z_shell_unlock(sh);
 
