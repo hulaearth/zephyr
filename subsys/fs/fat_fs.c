@@ -455,11 +455,27 @@ static int fatfs_statvfs(struct fs_mount_t *mountp,
 	return res;
 }
 
+static int fatfs_unmount(struct fs_mount_t *mountp);
+
+static FRESULT fatfs_mount_volume(struct fs_mount_t *mountp)
+{
+	const char *path = translate_path(mountp->mnt_point);
+	FRESULT res = f_mount((FATFS *)mountp->fs_data, path, 1);
+
+	if (res == FR_NO_FILESYSTEM || res == FR_DISK_ERR) {
+		/* These failures occur after FatFs acquired the disk reference. */
+		(void)fatfs_unmount(mountp);
+	} else if (res != FR_OK) {
+		/* FatFs can register the volume even when disk initialization fails. */
+		(void)f_mount(NULL, path, 0);
+	}
+
+	return res;
+}
+
 static int fatfs_mount(struct fs_mount_t *mountp)
 {
-	FRESULT res;
-
-	res = f_mount((FATFS *)mountp->fs_data, translate_path(mountp->mnt_point), 1);
+	FRESULT res = fatfs_mount_volume(mountp);
 
 #if defined(CONFIG_FS_FATFS_MOUNT_MKFS)
 	if (res == FR_NO_FILESYSTEM &&
@@ -480,8 +496,7 @@ static int fatfs_mount(struct fs_mount_t *mountp)
 
 		res = f_mkfs(translate_path(mountp->mnt_point), &mkfs_opt, work, sizeof(work));
 		if (res == FR_OK) {
-			res = f_mount((FATFS *)mountp->fs_data,
-					translate_path(mountp->mnt_point), 1);
+			res = fatfs_mount_volume(mountp);
 		}
 	}
 #endif /* CONFIG_FS_FATFS_MOUNT_MKFS */
