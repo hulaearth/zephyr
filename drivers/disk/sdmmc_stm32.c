@@ -99,6 +99,8 @@ struct stm32_sdmmc_priv {
 	struct k_sem sync;
 	HandleTypeDef hsd;
 	int status;
+	/* HAL completion errors are independent of disk initialization. */
+	uint32_t transfer_error;
 	struct k_work work;
 	struct gpio_callback cd_cb;
 	struct gpio_dt_spec cd;
@@ -145,7 +147,7 @@ static void stm32_sdmmc_isr(const struct device *dev)
 	{                                                                                          \
 		struct stm32_sdmmc_priv *priv = CONTAINER_OF(hsd, struct stm32_sdmmc_priv, hsd);   \
                                                                                                    \
-		priv->status = hsd->ErrorCode;                                                     \
+		priv->transfer_error = hsd->ErrorCode; \
                                                                                                    \
 		k_sem_give(&priv->sync);                                                           \
 	}
@@ -591,8 +593,9 @@ static int stm32_sdmmc_access_read(struct disk_info *disk, uint8_t *data_buf,
 	}
 #endif
 
-	if (priv->status != DISK_STATUS_OK) {
-		LOG_ERR("sd read error %d", priv->status);
+	if (priv->transfer_error != 0U || priv->status != DISK_STATUS_OK) {
+		LOG_ERR("sd read error 0x%x (disk status %d)",
+			(unsigned int)priv->transfer_error, priv->status);
 		err = -EIO;
 		goto end;
 	}
@@ -677,8 +680,9 @@ static int stm32_sdmmc_access_write(struct disk_info *disk,
 	}
 #endif
 
-	if (priv->status != DISK_STATUS_OK) {
-		LOG_ERR("sd write error %d", priv->status);
+	if (priv->transfer_error != 0U || priv->status != DISK_STATUS_OK) {
+		LOG_ERR("sd write error 0x%x (disk status %d)",
+			(unsigned int)priv->transfer_error, priv->status);
 		err = -EIO;
 		goto end;
 	}
