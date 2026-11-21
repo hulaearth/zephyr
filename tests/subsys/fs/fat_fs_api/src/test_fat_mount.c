@@ -8,6 +8,10 @@
 
 #include "test_fat.h"
 
+#include <zephyr/storage/disk_access.h>
+
+extern struct disk_info *disk_access_get_di(const char *name);
+
 /* mounting info */
 static struct fs_mount_t fatfs_mnt = {
 	.type = FS_FATFS,
@@ -85,10 +89,23 @@ void test_fat_unmount(void)
 
 void test_fat_mount(void)
 {
+	struct disk_info *disk = disk_access_get_di(DISK_NAME);
+	uint16_t disk_refs_after_wipe;
+	DIR directory;
+
+	zassert_not_null(disk);
 	zassert_true(wipe_partition() == 0);
+	disk_refs_after_wipe = disk->refcnt;
+	zassert_equal(disk_refs_after_wipe, 1, "partition wipe must own the only reference");
 	zassert_false(test_unmount() == TC_PASS);
 	zassert_true(test_mount_no_format() == TC_PASS);
+	zassert_equal(disk->refcnt, disk_refs_after_wipe);
+	zassert_equal(f_opendir(&directory, DISK_NAME ":"), FR_NOT_ENABLED);
+
+	/* Release the reference acquired by wipe_partition(). */
+	zassert_ok(disk_access_ioctl(DISK_NAME, DISK_IOCTL_CTRL_DEINIT, NULL));
 	zassert_true(test_mount_rd_only_no_sys() == TC_PASS);
+	zassert_equal(disk->refcnt, disk_refs_after_wipe - 1);
 
 /*
  * When using an SD card partition table (MBR), format only within the
